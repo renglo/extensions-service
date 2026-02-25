@@ -148,7 +148,8 @@ cat > "$TASK_DEF" << TASKDEF
         "logDriver": "awslogs",
         "options": {
           "awslogs-group": "/ecs/${ECS_TASK_FAMILY}",
-          "awslogs-region": "${AWS_REGION}"
+          "awslogs-region": "${AWS_REGION}",
+          "awslogs-stream-prefix": "ecs"
         }
       }
     }
