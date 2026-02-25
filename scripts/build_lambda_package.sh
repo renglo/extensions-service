@@ -17,20 +17,34 @@ RENGLO_LIB_DIR="$WORKSPACE_ROOT/dev/renglo-lib"
 BUILD_DIR="$PACKAGE_DIR/.lambda_build"
 OUTPUT_ZIP="$PACKAGE_DIR/lambda_deployment.zip"
 # Build for Lambda (amd64) by default; set EXTENSION_SERVICE_NATIVE_PLATFORM=1 for local-only arm64 image.
+# Set EXTENSION_SERVICE_LARGE_BUILD=1 for ECS (installs [ml] deps, outputs ecs-builder image, no zip).
+BUILD_LARGE="${EXTENSION_SERVICE_LARGE_BUILD:-0}"
 if [[ "${EXTENSION_SERVICE_NATIVE_PLATFORM:-0}" == "1" ]]; then
   DOCKER_PLATFORM="linux/arm64"
-  DOCKER_IMAGE="${EXTENSION_NAME}-lambda-builder:local"
+  if [[ "$BUILD_LARGE" == "1" ]]; then
+    DOCKER_IMAGE="${EXTENSION_NAME}-ecs-builder:local"
+  else
+    DOCKER_IMAGE="${EXTENSION_NAME}-lambda-builder:local"
+  fi
   EXTRACT_ZIP=false
   echo "=========================================="
-  echo "Building local-only image (arm64): $EXTENSION_NAME"
+  echo "Building local-only image (arm64): $EXTENSION_NAME $([[ "$BUILD_LARGE" == "1" ]] && echo '(ECS large)' || true)"
   echo "=========================================="
 else
   DOCKER_PLATFORM="linux/amd64"
-  DOCKER_IMAGE="${EXTENSION_NAME}-lambda-builder:latest"
-  EXTRACT_ZIP=true
-  echo "=========================================="
-  echo "Building Lambda Deployment Package (amd64): $EXTENSION_NAME"
-  echo "=========================================="
+  if [[ "$BUILD_LARGE" == "1" ]]; then
+    DOCKER_IMAGE="${EXTENSION_NAME}-ecs-builder:latest"
+    EXTRACT_ZIP=false
+    echo "=========================================="
+    echo "Building ECS large image (amd64): $EXTENSION_NAME"
+    echo "=========================================="
+  else
+    DOCKER_IMAGE="${EXTENSION_NAME}-lambda-builder:latest"
+    EXTRACT_ZIP=true
+    echo "=========================================="
+    echo "Building Lambda Deployment Package (amd64): $EXTENSION_NAME"
+    echo "=========================================="
+  fi
 fi
 echo ""
 
@@ -54,7 +68,8 @@ fi
 echo "==> Using Docker to build Lambda-compatible package..."
 echo ""
 
-# Dockerfile with EXTENSION_NAME expanded (unquoted heredoc)
+# Dockerfile with EXTENSION_NAME and BUILD_LARGE expanded (unquoted heredoc)
+# BUILD_LARGE=1: also install [ml] optional deps (for ECS large image)
 cat > "$BUILD_DIR/Dockerfile" << DOCKERFILE
 FROM public.ecr.aws/lambda/python:3.12
 
@@ -69,6 +84,7 @@ WORKDIR /build
 COPY extensions/${EXTENSION_NAME}/package/ /build/package/
 COPY dev/renglo-lib/ /build/renglo-lib/
 
+ARG BUILD_LARGE=0
 RUN set -e && \\
     cd /build && \\
     python3.12 -m pip install --upgrade pip setuptools wheel -q && \\
@@ -76,6 +92,7 @@ RUN set -e && \\
     python3.12 -m pip install --no-cache-dir --target /build/output /build/renglo-lib && \\
     python3.12 -m pip install --no-cache-dir build wheel setuptools-scm 2>&1 | tail -5 || true && \\
     python3.12 -c "import tomllib, subprocess, sys; deps=tomllib.load(open('/build/package/pyproject.toml','rb'))['project']['dependencies']; [subprocess.run([sys.executable, '-m', 'pip', 'install', '--no-cache-dir', '--target', '/build/output', d], check=False) or True for d in deps]" 2>&1 | tail -60 && \\
+    if [ "\$BUILD_LARGE" = "1" ]; then python3.12 -m pip install --no-cache-dir --target /build/output \"/build/package[ml]\" 2>&1 | tail -30 || true; fi && \\
     echo "Checking if ${EXTENSION_NAME} package was installed..." && \\
     (test -d /build/output/${EXTENSION_NAME} && echo "  ✓ ${EXTENSION_NAME} directory found" || echo "  ✗ ${EXTENSION_NAME} NOT found - will copy source") && \\
     cp -r /build/package/${EXTENSION_NAME} /build/output/ && \\
@@ -89,14 +106,23 @@ RUN set -e && \\
     find . -type d -name '*.egg-info' -exec rm -rf {} + 2>/dev/null || true && \\
     find . -type f -name '*.md' -delete 2>/dev/null || true && \\
     find . -type d -name 'examples' -exec rm -rf {} + 2>/dev/null || true && \\
-    zip -r /build/lambda_deployment.zip . -q && \\
+    if [ "\$BUILD_LARGE" != "1" ]; then zip -r /build/lambda_deployment.zip . -q; fi && \\
     echo "Build complete!"
 DOCKERFILE
+
+if [[ "$BUILD_LARGE" == "1" ]]; then
+  cat >> "$BUILD_DIR/Dockerfile" << 'DOCKERFILE_ECS'
+COPY dev/extensions-service/scripts/ecs_handler_entrypoint.py /ecs_entrypoint.py
+WORKDIR /build/output
+ENTRYPOINT ["python3.12", "/ecs_entrypoint.py"]
+DOCKERFILE_ECS
+fi
 
 echo "==> Building Docker image ($DOCKER_PLATFORM)..."
 cd "$WORKSPACE_ROOT"
 docker build \
   --platform "$DOCKER_PLATFORM" \
+  --build-arg "BUILD_LARGE=$BUILD_LARGE" \
   --no-cache \
   -f "$BUILD_DIR/Dockerfile" \
   -t "$DOCKER_IMAGE" \
@@ -130,12 +156,17 @@ if [[ "$EXTRACT_ZIP" == "true" ]]; then
   echo "Size: $ZIP_SIZE"
   echo ""
 else
-  echo "==> Skipping zip extraction (local-only image; use default build for Lambda deploy)"
+  echo "==> Skipping zip extraction (local-only or ECS image)"
   echo ""
   echo "=========================================="
   echo "Build complete!"
   echo "=========================================="
-  echo "Image: $DOCKER_IMAGE (use with run-local and EXTENSION_SERVICE_NATIVE_PLATFORM=1)"
+  echo "Image: $DOCKER_IMAGE"
+  if [[ "$BUILD_LARGE" == "1" ]]; then
+    echo "(ECS large image; deploy with --type ecs)"
+  else
+    echo "(use with run-local and EXTENSION_SERVICE_NATIVE_PLATFORM=1)"
+  fi
   echo ""
 fi
 

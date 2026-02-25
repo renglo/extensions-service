@@ -66,3 +66,35 @@ def get_package_dir(extension: str, workspace_root: Path | None = None) -> Path:
     """Return extensions/<extension>/package directory."""
     root = workspace_root or get_workspace_root()
     return root / "extensions" / extension / "package"
+
+
+def get_ecs_handlers_for_extension(extension: str, workspace_root: Path | None = None) -> list[str]:
+    """
+    Parse EXTERNAL_HANDLERS_ECS_HANDLERS from env or system/env_config.py.
+    Format: "ext1:handler1,handler2;ext2:handler3". Returns list of handler names for this extension.
+    """
+    import os
+    raw = os.environ.get("EXTERNAL_HANDLERS_ECS_HANDLERS", "")
+    if not raw:
+        root = workspace_root or get_workspace_root()
+        env_config = root / "system" / "env_config.py"
+        if env_config.is_file():
+            try:
+                with open(env_config) as f:
+                    for line in f:
+                        if "EXTERNAL_HANDLERS_ECS_HANDLERS" in line and "=" in line:
+                            # Parse Python assignment: EXTERNAL_HANDLERS_ECS_HANDLERS = '...'
+                            raw = line.split("=", 1)[1].strip().strip("'\"").strip()
+                            break
+            except Exception:
+                pass
+    result = []
+    for part in raw.split(";"):
+        part = part.strip()
+        if ":" not in part:
+            continue
+        ext, handlers_str = part.split(":", 1)
+        if ext.strip().lower() == extension.lower():
+            result = [h.strip().lower() for h in handlers_str.split(",") if h.strip()]
+            break
+    return result

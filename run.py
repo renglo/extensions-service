@@ -9,6 +9,7 @@ Usage:
   python dev/extension-service/run.py noma view-logs --follow
   python dev/extension-service/run.py noma test my_handler
 """
+import json
 import os
 import subprocess
 import sys
@@ -19,6 +20,8 @@ from lib import (
     get_script_dir,
     get_workspace_root,
     get_function_name,
+    get_package_dir,
+    get_ecs_handlers_for_extension,
     list_extensions,
     validate_extension,
 )
@@ -72,23 +75,67 @@ def cmd_list(_args: list[str]) -> int:
 def cmd_build(extension: str, args: list[str]) -> int:
     validate_extension(extension)
     use_local = "--local" in args
+    use_large = "--large" in args
     env = {
         "EXTENSION_NAME": extension,
         "WORKSPACE_ROOT": str(get_workspace_root()),
         "EXTENSION_SERVICE_NATIVE_PLATFORM": "1" if use_local else "0",
+        "EXTENSION_SERVICE_LARGE_BUILD": "1" if use_large else "0",
     }
     return _run_script("build_lambda_package.sh", env=env)
 
 
+def _parse_deploy_type(args: list[str]) -> tuple[str, list[str]]:
+    """Extract --type lambda|ecs|default. Returns (type, remaining_args). Default type is lambda."""
+    deploy_type = "lambda"
+    out = []
+    i = 0
+    while i < len(args):
+        if args[i] in ("--type", "-t") and i + 1 < len(args):
+            deploy_type = args[i + 1].lower()
+            if deploy_type not in ("lambda", "ecs", "default"):
+                print(f"ERROR: --type must be lambda, ecs, or default (got {deploy_type})", file=sys.stderr)
+                sys.exit(1)
+            i += 2
+            continue
+        out.append(args[i])
+        i += 1
+    return deploy_type, out
+
+
 def cmd_deploy(extension: str, args: list[str]) -> int:
     validate_extension(extension)
-    profile, filtered_args = _parse_profile_and_filter_args(args)
+    profile, rest = _parse_profile_and_filter_args(args)
+    deploy_type, filtered_args = _parse_deploy_type(rest)
     env = {
         "EXTENSION_NAME": extension,
         "WORKSPACE_ROOT": str(get_workspace_root()),
     }
     if profile is not None:
         env["AWS_PROFILE"] = profile
+
+    if deploy_type == "ecs":
+        return _run_script("deploy_ecs.sh", env=env)
+    if deploy_type == "default":
+        ecs_handlers = get_ecs_handlers_for_extension(extension)
+        root = get_workspace_root()
+        package_dir = get_package_dir(extension, root)
+        handlers_config = package_dir / "handlers_config.json"
+        all_handlers = []
+        if handlers_config.is_file():
+            with open(handlers_config) as f:
+                data = json.load(f)
+                all_handlers = list(data.get("handlers", {}).keys())
+        deploy_ecs = len(ecs_handlers) > 0
+        deploy_lambda = len(ecs_handlers) == 0 or (set(h.lower() for h in all_handlers) - set(ecs_handlers))
+        if deploy_lambda:
+            rc = _run_script("deploy_as_a_service.sh", env=env, extra_args=filtered_args)
+            if rc != 0:
+                return rc
+        if deploy_ecs:
+            return _run_script("deploy_ecs.sh", env=env)
+        return 0
+
     return _run_script("deploy_as_a_service.sh", env=env, extra_args=filtered_args)
 
 
@@ -153,8 +200,8 @@ def main() -> int:
         print("       run.py list", file=sys.stderr)
         print("", file=sys.stderr)
         print("Actions: build, deploy, setup-iam, run-local, view-logs, test", file=sys.stderr)
-        print("  build       Build Lambda deployment package (Docker). Use --local for arm64 (fast run-local on M1/M2); omit for amd64 + zip (Lambda deploy)", file=sys.stderr)
-        print("  deploy      deploy | update | undeploy  (e.g. deploy --clean, --profile NAME)", file=sys.stderr)
+        print("  build       Build package (Docker). --local = arm64 for run-local; --large = ECS image with [ml] deps; omit = Lambda zip.", file=sys.stderr)
+        print("  deploy      deploy | update | undeploy  (e.g. deploy deploy --clean). --type lambda|ecs|default (default = lambda)", file=sys.stderr)
         print("  setup-iam   Create/update IAM policy and role for the Lambda (--profile NAME)", file=sys.stderr)
         print("  run-local   Run a handler locally (Docker). Uses :local image if present (from build --local), else :latest. Args: <handler_name> [payload.json] [--rebuild]", file=sys.stderr)
         print("  view-logs   Tail CloudWatch logs. Optional: --follow, --filter PATTERN, --hours N, --profile NAME", file=sys.stderr)
