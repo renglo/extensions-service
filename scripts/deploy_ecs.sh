@@ -161,22 +161,31 @@ aws ecs register-task-definition --cli-input-json "file://$TASK_DEF" --region "$
 rm -f "$TASK_DEF"
 echo "Registered task definition $ECS_TASK_FAMILY"
 
-# Write ecs_deploy_config.json so the system can read ECS config without env (user must add subnets/sg)
+# Write ecs_deploy_config.json; auto-fill subnets/security_groups from default VPC when possible
 SERVICE_DIR="$WORKSPACE_ROOT/extensions/$EXTENSION_NAME/installer/service"
 mkdir -p "$SERVICE_DIR"
 ECS_JSON="$SERVICE_DIR/ecs_deploy_config.json"
+DEFAULT_VPC_ID=$(aws ec2 describe-vpcs --filters Name=is-default,Values=true --query 'Vpcs[0].VpcId' --output text --region "$AWS_REGION" 2>/dev/null || true)
+SUBNETS_JSON="[]"
+SECURITY_GROUPS_JSON="[]"
+if [[ -n "$DEFAULT_VPC_ID" && "$DEFAULT_VPC_ID" != "None" ]]; then
+  SUBNETS_JSON=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$DEFAULT_VPC_ID" --query 'Subnets[*].SubnetId' --output json --region "$AWS_REGION" 2>/dev/null || echo "[]")
+  SG_ID=$(aws ec2 describe-security-groups --filters "Name=vpc-id,Values=$DEFAULT_VPC_ID" "Name=group-name,Values=default" --query 'SecurityGroups[0].GroupId' --output text --region "$AWS_REGION" 2>/dev/null || true)
+  [[ -z "$SUBNETS_JSON" || "$SUBNETS_JSON" == "null" ]] && SUBNETS_JSON="[]"
+  [[ -n "$SG_ID" && "$SG_ID" != "None" ]] && SECURITY_GROUPS_JSON="[\"$SG_ID\"]"
+fi
 cat > "$ECS_JSON" << ECSJSON
 {
   "s3_bucket": "$ECS_BUCKET",
   "cluster": "$ECS_CLUSTER",
   "task_definition": "$ECS_TASK_FAMILY",
-  "subnets": [],
-  "security_groups": []
+  "subnets": $SUBNETS_JSON,
+  "security_groups": $SECURITY_GROUPS_JSON
 }
 ECSJSON
-echo "Wrote $ECS_JSON (add subnets and security_groups for Fargate, or set ECS_SUBNETS/ECS_SECURITY_GROUPS in env)"
+echo "Wrote $ECS_JSON"
 
 echo ""
 echo "Deploy complete. ECS config written to extensions/$EXTENSION_NAME/installer/service/ecs_deploy_config.json"
-echo "Add subnets and security_groups to that file (or set ECS_SUBNETS, ECS_SECURITY_GROUPS in env) for invocations to work."
+[[ "$SUBNETS_JSON" == "[]" || "$SECURITY_GROUPS_JSON" == "[]" ]] && echo "No default VPC found; add subnets and security_groups to the file or set ECS_SUBNETS, ECS_SECURITY_GROUPS in env for invocations to work."
 echo ""
