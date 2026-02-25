@@ -92,8 +92,7 @@ RUN set -e && \\
     python3.12 -m pip install --no-cache-dir --target /build/output /build/renglo-lib && \\
     python3.12 -m pip install --no-cache-dir build wheel setuptools-scm 2>&1 | tail -5 || true && \\
     python3.12 -c "import tomllib, subprocess, sys; deps=tomllib.load(open('/build/package/pyproject.toml','rb'))['project']['dependencies']; [subprocess.run([sys.executable, '-m', 'pip', 'install', '--no-cache-dir', '--target', '/build/output', d], check=False) or True for d in deps]" 2>&1 | tail -60 && \\
-    if [ "\$BUILD_LARGE" = "1" ]; then python3.12 -m pip install --no-cache-dir --target /build/output \"/build/package[ml]\" 2>&1 | tail -30 || true; fi && \\
-    echo "Checking if ${EXTENSION_NAME} package was installed..." && \\
+    if [ "\$BUILD_LARGE" = "1" ]; then python3.12 -m pip install --no-cache-dir --target /build/output \"/build/package[ml]\" && ( python3.12 -c "import sys; sys.path.insert(0,'/build/output'); import numpy; print('✓ [ml] numpy OK')" ) || ( echo "ERROR: [ml] install failed or numpy missing" >&2; exit 1 ); fi && \\    echo "Checking if ${EXTENSION_NAME} package was installed..." && \\
     (test -d /build/output/${EXTENSION_NAME} && echo "  ✓ ${EXTENSION_NAME} directory found" || echo "  ✗ ${EXTENSION_NAME} NOT found - will copy source") && \\
     cp -r /build/package/${EXTENSION_NAME} /build/output/ && \\
     cp /build/package/lambda_router.py /build/output/ && \\
