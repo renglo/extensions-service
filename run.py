@@ -8,7 +8,7 @@ Usage:
   python dev/extension-service/run.py noma run-local my_handler
   python dev/extension-service/run.py noma view-logs --follow
   python dev/extension-service/run.py noma test my_handler
-"""
+""" 
 import json
 import os
 import subprocess
@@ -200,7 +200,7 @@ def main() -> int:
         print("       run.py list", file=sys.stderr)
         print("", file=sys.stderr)
         print("Actions: build, deploy, setup-iam, run-local, view-logs, test", file=sys.stderr)
-        print("  build       Build package (Docker). --local = arm64 for run-local; --large = ECS image with [ml] deps; omit = Lambda zip.", file=sys.stderr)
+        print("  build       Build package (Docker). --local = arm64 for run-local; --large = ECS image with [large-dependencies] extra; omit = Lambda zip.", file=sys.stderr)
         print("  deploy      deploy | update | undeploy  (e.g. deploy deploy --clean). --type lambda|ecs|default (default = lambda)", file=sys.stderr)
         print("  setup-iam   Create/update IAM policy and role for the Lambda (--profile NAME)", file=sys.stderr)
         print("  run-local   Run a handler locally (Docker). Uses :local image if present (from build --local), else :latest. Args: <handler_name> [payload.json] [--rebuild]", file=sys.stderr)

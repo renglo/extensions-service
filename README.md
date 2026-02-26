@@ -12,7 +12,7 @@ python3 dev/extensions-service/run.py list
 
 # Build: Lambda (default), ECS large (--large), or local ARM (--local)
 python3 dev/extensions-service/run.py <extension> build                 # Lambda zip + image
-python3 dev/extensions-service/run.py <extension> build --large           # ECS image (with [ml] deps)
+python3 dev/extensions-service/run.py <extension> build --large           # ECS image (with [large-dependencies] extra)
 python3 dev/extensions-service/run.py <extension> build --local           # arm64 for run-local
 
 # Deploy: create or update Lambda and/or ECS (--type lambda | ecs | default)
@@ -39,7 +39,7 @@ python3 dev/extensions-service/run.py <extension> run-local <handler_name> path/
 | Goal | Command | Image | Zip |
 |------|---------|--------|-----|
 | **Lambda** (handlers ligeros) | `run.py <ext> build` | `<ext>-lambda-builder:latest` (amd64) | `lambda_deployment.zip` |
-| **ECS large** (handlers con [ml], TensorFlow, etc.) | `run.py <ext> build --large` | `<ext>-ecs-builder:latest` (amd64) | none |
+| **ECS large** (handlers con [large-dependencies], TensorFlow, etc.) | `run.py <ext> build --large` | `<ext>-ecs-builder:latest` (amd64) | none |
 | **Local ARM (M1/M2)** | `run.py <ext> build --local` | `<ext>-lambda-builder:local` (arm64) | not extracted |
 
 - **Deploy Lambda:** `build` then `deploy deploy` (or `deploy deploy --type lambda`). Uses zip.
@@ -87,6 +87,6 @@ Each extension still keeps in `extensions/<name>/installer/service/`:
 
 Script logic lives here in `dev/extensions-service/scripts/` and is parameterized by `EXTENSION_NAME` and `WORKSPACE_ROOT` (set by `run.py`). Each extension’s `installer/service/` now contains only config files (no duplicate scripts).
 
-## Optional dependencies and [ml] (ECS large build)
+## Optional dependencies and [large-dependencies] (ECS large build)
 
-In each extension's `package/pyproject.toml`: **`[project.dependencies]`** are installed for the Lambda build (kept small). **`[project.optional-dependencies]`** define extra groups like **`ml`** (TensorFlow, numpy, scikit-learn); they are not installed for Lambda. The ECS large build (`build --large`) runs `pip install .[ml]`, so only that image gets the `ml` libs. Handlers that need TensorFlow must list it under `[project.optional-dependencies] ml`; in this project, `[ml]` is only used by the ECS build.
+In each extension's `package/pyproject.toml`: **`[project.dependencies]`** are installed for the Lambda build (kept small). **`[project.optional-dependencies]`** can define a **`large-dependencies`** extra (e.g. TensorFlow, numpy, scikit-learn); those are not installed for Lambda. The ECS large build (`build --large`) runs `pip install .[large-dependencies]`, so only that image gets the heavy libs. Handlers that need TensorFlow or other large deps must list them under `[project.optional-dependencies] large-dependencies`.

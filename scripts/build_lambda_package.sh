@@ -17,7 +17,7 @@ RENGLO_LIB_DIR="$WORKSPACE_ROOT/dev/renglo-lib"
 BUILD_DIR="$PACKAGE_DIR/.lambda_build"
 OUTPUT_ZIP="$PACKAGE_DIR/lambda_deployment.zip"
 # Build for Lambda (amd64) by default; set EXTENSION_SERVICE_NATIVE_PLATFORM=1 for local-only arm64 image.
-# Set EXTENSION_SERVICE_LARGE_BUILD=1 for ECS (installs [ml] deps, outputs ecs-builder image, no zip).
+# Set EXTENSION_SERVICE_LARGE_BUILD=1 for ECS (installs [large-dependencies] extra, outputs ecs-builder image, no zip).
 BUILD_LARGE="${EXTENSION_SERVICE_LARGE_BUILD:-0}"
 if [[ "${EXTENSION_SERVICE_NATIVE_PLATFORM:-0}" == "1" ]]; then
   DOCKER_PLATFORM="linux/arm64"
@@ -68,8 +68,19 @@ fi
 echo "==> Using Docker to build Lambda-compatible package..."
 echo ""
 
-# Dockerfile with EXTENSION_NAME and BUILD_LARGE expanded (unquoted heredoc)
-# BUILD_LARGE=1: also install [ml] optional deps (for ECS large image)
+# When BUILD_LARGE=1: inject pip install [large-dependencies] and check; no if inside container.
+# When BUILD_LARGE=0: inject zip step. This way the RUN content differs and always runs correctly.
+RUN_ML_LINE=""
+if [[ "$BUILD_LARGE" == "1" ]]; then
+  RUN_ML_LINE='    python3.12 -m pip install --no-cache-dir --target /build/output "/build/package[large-dependencies]" && ( python3.12 -c "import sys; sys.path.insert(0,\"/build/output\"); import numpy; print(\"✓ large-dependencies OK\")" ) || ( echo "ERROR: large-dependencies install failed or numpy missing" >&2; exit 1 ) && \'
+fi
+if [[ "$BUILD_LARGE" == "1" ]]; then
+  RUN_ZIP_LINE='    true && \'
+else
+  RUN_ZIP_LINE='    zip -r /build/lambda_deployment.zip . -q && \'
+fi
+
+# Dockerfile with EXTENSION_NAME and RUN_ML_LINE/RUN_ZIP_LINE expanded (unquoted heredoc)
 cat > "$BUILD_DIR/Dockerfile" << DOCKERFILE
 FROM public.ecr.aws/lambda/python:3.12
 
@@ -84,7 +95,6 @@ WORKDIR /build
 COPY extensions/${EXTENSION_NAME}/package/ /build/package/
 COPY dev/renglo-lib/ /build/renglo-lib/
 
-ARG BUILD_LARGE=0
 RUN set -e && \\
     cd /build && \\
     python3.12 -m pip install --upgrade pip setuptools wheel -q && \\
@@ -92,7 +102,8 @@ RUN set -e && \\
     python3.12 -m pip install --no-cache-dir --target /build/output /build/renglo-lib && \\
     python3.12 -m pip install --no-cache-dir build wheel setuptools-scm 2>&1 | tail -5 || true && \\
     python3.12 -c "import tomllib, subprocess, sys; deps=tomllib.load(open('/build/package/pyproject.toml','rb'))['project']['dependencies']; [subprocess.run([sys.executable, '-m', 'pip', 'install', '--no-cache-dir', '--target', '/build/output', d], check=False) or True for d in deps]" 2>&1 | tail -60 && \\
-    if [ "\$BUILD_LARGE" = "1" ]; then python3.12 -m pip install --no-cache-dir --target /build/output \"/build/package[ml]\" && ( python3.12 -c "import sys; sys.path.insert(0,'/build/output'); import numpy; print('✓ [ml] numpy OK')" ) || ( echo "ERROR: [ml] install failed or numpy missing" >&2; exit 1 ); fi && \\    echo "Checking if ${EXTENSION_NAME} package was installed..." && \\
+    $RUN_ML_LINE
+    echo "Checking if ${EXTENSION_NAME} package was installed..." && \\
     (test -d /build/output/${EXTENSION_NAME} && echo "  ✓ ${EXTENSION_NAME} directory found" || echo "  ✗ ${EXTENSION_NAME} NOT found - will copy source") && \\
     cp -r /build/package/${EXTENSION_NAME} /build/output/ && \\
     cp /build/package/lambda_router.py /build/output/ && \\
@@ -105,7 +116,7 @@ RUN set -e && \\
     find . -type d -name '*.egg-info' -exec rm -rf {} + 2>/dev/null || true && \\
     find . -type f -name '*.md' -delete 2>/dev/null || true && \\
     find . -type d -name 'examples' -exec rm -rf {} + 2>/dev/null || true && \\
-    if [ "\$BUILD_LARGE" != "1" ]; then zip -r /build/lambda_deployment.zip . -q; fi && \\
+    $RUN_ZIP_LINE
     echo "Build complete!"
 DOCKERFILE
 
@@ -121,7 +132,6 @@ echo "==> Building Docker image ($DOCKER_PLATFORM)..."
 cd "$WORKSPACE_ROOT"
 docker build \
   --platform "$DOCKER_PLATFORM" \
-  --build-arg "BUILD_LARGE=$BUILD_LARGE" \
   --no-cache \
   -f "$BUILD_DIR/Dockerfile" \
   -t "$DOCKER_IMAGE" \
