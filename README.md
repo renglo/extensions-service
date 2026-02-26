@@ -90,3 +90,9 @@ Script logic lives here in `dev/extensions-service/scripts/` and is parameterize
 ## Optional dependencies and [large-dependencies] (ECS large build)
 
 In each extension's `package/pyproject.toml`: **`[project.dependencies]`** are installed for the Lambda build (kept small). **`[project.optional-dependencies]`** can define a **`large-dependencies`** extra (e.g. TensorFlow, numpy, scikit-learn); those are not installed for Lambda. The ECS large build (`build --large`) runs `pip install .[large-dependencies]`, so only that image gets the heavy libs. Handlers that need TensorFlow or other large deps must list them under `[project.optional-dependencies] large-dependencies`.
+
+**Note**: for windows, running on WSL:
+```bash
+ sed -i 's/\r$//' dev/extensions-service/scripts/*.sh
+```
+might be necessary before build and deploy

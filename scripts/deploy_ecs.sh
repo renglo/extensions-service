@@ -12,6 +12,7 @@ fi
 
 WORKSPACE_ROOT="$(cd "$WORKSPACE_ROOT" && pwd)"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+UTILS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)/utils"
 PACKAGE_DIR="$WORKSPACE_ROOT/extensions/$EXTENSION_NAME/package"
 DOCKER_IMAGE="${EXTENSION_NAME}-ecs-builder:latest"
 
@@ -44,29 +45,10 @@ if ! aws s3api head-bucket --bucket "$ECS_BUCKET" 2>/dev/null; then
     $([[ "$AWS_REGION" != "us-east-1" ]] && echo "--create-bucket-configuration LocationConstraint=$AWS_REGION" || true)
   echo "Created bucket $ECS_BUCKET"
 fi
-# Lifecycle: expire payloads/ and results/ after 3 days
-LIFECYCLE=$(mktemp)
-cat > "$LIFECYCLE" << 'LIFE'
-{
-  "Rules": [
-    {
-      "ID": "ExpirePayloadsAndResults",
-      "Status": "Enabled",
-      "Filter": { "Prefix": "payloads/" },
-      "Expiration": { "Days": 3 }
-    },
-    {
-      "ID": "ExpireResults",
-      "Status": "Enabled",
-      "Filter": { "Prefix": "results/" },
-      "Expiration": { "Days": 3 }
-    }
-  ]
-}
-LIFE
-aws s3api put-bucket-lifecycle-configuration --bucket "$ECS_BUCKET" --lifecycle-configuration "file://$LIFECYCLE"
-rm -f "$LIFECYCLE"
-echo "Lifecycle rule set (3 days)."
+# Lifecycle: expire payloads/ and results/ after 1 day
+LIFECYCLE_FILE="$UTILS_DIR/s3-lifecycle-payloads-results.json"
+aws s3api put-bucket-lifecycle-configuration --bucket "$ECS_BUCKET" --lifecycle-configuration "file://$LIFECYCLE_FILE"
+echo "Lifecycle rule set (1 day)."
 
 echo "==> ECR repository..."
 if ! aws ecr describe-repositories --repository-names "$ECR_REPO" --region "$AWS_REGION" 2>/dev/null; then
@@ -100,28 +82,11 @@ if ! aws iam get-role --role-name "$TASK_ROLE_NAME" 2>/dev/null; then
   aws iam create-role --role-name "$TASK_ROLE_NAME" \
     --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ecs-tasks.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
   TASK_POLICY=$(mktemp)
-  cat > "$TASK_POLICY" << TASKPOL
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Action": ["s3:GetObject", "s3:PutObject"],
-      "Resource": "arn:aws:s3:::${ECS_BUCKET}/*"
-    },
-    {
-      "Effect": "Allow",
-      "Action": "ecr:GetAuthorizationToken",
-      "Resource": "*"
-    },
-    {
-      "Effect": "Allow",
-      "Action": ["ecr:BatchCheckLayerAvailability", "ecr:GetDownloadUrlForLayer", "ecr:BatchGetImage"],
-      "Resource": "arn:aws:ecr:${AWS_REGION}:${AWS_ACCOUNT}:repository/${ECR_REPO}"
-    }
-  ]
-}
-TASKPOL
+  sed -e "s/{{ECS_BUCKET}}/$ECS_BUCKET/g" \
+      -e "s/{{AWS_REGION}}/$AWS_REGION/g" \
+      -e "s/{{AWS_ACCOUNT}}/$AWS_ACCOUNT/g" \
+      -e "s/{{ECR_REPO}}/$ECR_REPO/g" \
+      "$UTILS_DIR/ecs-task-role-policy.template.json" > "$TASK_POLICY"
   aws iam put-role-policy --role-name "$TASK_ROLE_NAME" --policy-name "ecs-handlers-s3-ecr" --policy-document "file://$TASK_POLICY"
   rm -f "$TASK_POLICY"
   echo "Created task role $TASK_ROLE_NAME"
@@ -141,62 +106,21 @@ fi
 
 echo "==> Task definition..."
 TASK_DEF=$(mktemp)
-cat > "$TASK_DEF" << TASKDEF
-{
-  "family": "${ECS_TASK_FAMILY}",
-  "networkMode": "awsvpc",
-  "requiresCompatibilities": ["FARGATE"],
-  "cpu": "256",
-  "memory": "512",
-  "executionRoleArn": "${EXECUTION_ROLE_ARN}",
-  "taskRoleArn": "${TASK_ROLE_ARN}",
-  "containerDefinitions": [
-    {
-      "name": "handler",
-      "image": "${ECR_URI}",
-      "essential": true,
-      "logConfiguration": {
-        "logDriver": "awslogs",
-        "options": {
-          "awslogs-group": "/ecs/${ECS_TASK_FAMILY}",
-          "awslogs-region": "${AWS_REGION}",
-          "awslogs-stream-prefix": "ecs"
-        }
-      }
-    }
-  ]
-}
-TASKDEF
+sed -e "s|{{ECS_TASK_FAMILY}}|$ECS_TASK_FAMILY|g" \
+    -e "s|{{EXECUTION_ROLE_ARN}}|$EXECUTION_ROLE_ARN|g" \
+    -e "s|{{TASK_ROLE_ARN}}|$TASK_ROLE_ARN|g" \
+    -e "s|{{ECR_URI}}|$ECR_URI|g" \
+    -e "s|{{AWS_REGION}}|$AWS_REGION|g" \
+    "$UTILS_DIR/ecs-task-definition.template.json" > "$TASK_DEF"
 aws logs create-log-group --log-group-name "/ecs/${ECS_TASK_FAMILY}" --region "$AWS_REGION" 2>/dev/null || true
 aws ecs register-task-definition --cli-input-json "file://$TASK_DEF" --region "$AWS_REGION" >/dev/null
 rm -f "$TASK_DEF"
 echo "Registered task definition $ECS_TASK_FAMILY"
 
-# Write ecs_deploy_config.json; auto-fill subnets/security_groups from default VPC when possible
-SERVICE_DIR="$WORKSPACE_ROOT/extensions/$EXTENSION_NAME/installer/service"
-mkdir -p "$SERVICE_DIR"
-ECS_JSON="$SERVICE_DIR/ecs_deploy_config.json"
-DEFAULT_VPC_ID=$(aws ec2 describe-vpcs --filters Name=is-default,Values=true --query 'Vpcs[0].VpcId' --output text --region "$AWS_REGION" 2>/dev/null || true)
-SUBNETS_JSON="[]"
-SECURITY_GROUPS_JSON="[]"
-if [[ -n "$DEFAULT_VPC_ID" && "$DEFAULT_VPC_ID" != "None" ]]; then
-  SUBNETS_JSON=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$DEFAULT_VPC_ID" --query 'Subnets[*].SubnetId' --output json --region "$AWS_REGION" 2>/dev/null || echo "[]")
-  SG_ID=$(aws ec2 describe-security-groups --filters "Name=vpc-id,Values=$DEFAULT_VPC_ID" "Name=group-name,Values=default" --query 'SecurityGroups[0].GroupId' --output text --region "$AWS_REGION" 2>/dev/null || true)
-  [[ -z "$SUBNETS_JSON" || "$SUBNETS_JSON" == "null" ]] && SUBNETS_JSON="[]"
-  [[ -n "$SG_ID" && "$SG_ID" != "None" ]] && SECURITY_GROUPS_JSON="[\"$SG_ID\"]"
-fi
-cat > "$ECS_JSON" << ECSJSON
-{
-  "s3_bucket": "$ECS_BUCKET",
-  "cluster": "$ECS_CLUSTER",
-  "task_definition": "$ECS_TASK_FAMILY",
-  "subnets": $SUBNETS_JSON,
-  "security_groups": $SECURITY_GROUPS_JSON
-}
-ECSJSON
-echo "Wrote $ECS_JSON"
+echo "==> ECS deploy config..."
+export ECS_BUCKET ECS_CLUSTER ECS_TASK_FAMILY AWS_REGION
+"$SCRIPT_DIR/write_ecs_deploy_config.sh"
 
 echo ""
 echo "Deploy complete. ECS config written to extensions/$EXTENSION_NAME/installer/service/ecs_deploy_config.json"
-[[ "$SUBNETS_JSON" == "[]" || "$SECURITY_GROUPS_JSON" == "[]" ]] && echo "No default VPC found; add subnets and security_groups to the file or set ECS_SUBNETS, ECS_SECURITY_GROUPS in env for invocations to work."
 echo ""
