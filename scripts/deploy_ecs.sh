@@ -128,6 +128,17 @@ TASKPOL
 fi
 TASK_ROLE_ARN="arn:aws:iam::${AWS_ACCOUNT}:role/${TASK_ROLE_NAME}"
 
+# Attach extension handlers policy to task role (same as Lambda: S3, IAM, etc. for handler operations)
+HANDLERS_POLICY_NAME="$(echo "${EXTENSION_NAME:0:1}" | tr '[:lower:]' '[:upper:]')${EXTENSION_NAME:1}HandlersPolicy"
+HANDLERS_POLICY_ARN="arn:aws:iam::${AWS_ACCOUNT}:policy/${HANDLERS_POLICY_NAME}"
+if aws iam get-policy --policy-arn "$HANDLERS_POLICY_ARN" >/dev/null 2>&1; then
+  aws iam attach-role-policy --role-name "$TASK_ROLE_NAME" --policy-arn "$HANDLERS_POLICY_ARN"
+  echo "Attached $HANDLERS_POLICY_NAME to task role (same as Lambda handlers)"
+else
+  echo "WARNING: Policy $HANDLERS_POLICY_NAME not found. ECS task will only have ECS bucket + ECR access." >&2
+  echo "         Run: python3 dev/extensions-service/run.py $EXTENSION_NAME setup-iam" >&2
+fi
+
 echo "==> Task definition..."
 TASK_DEF=$(mktemp)
 cat > "$TASK_DEF" << TASKDEF

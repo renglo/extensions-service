@@ -43,7 +43,7 @@ python3 dev/extensions-service/run.py <extension> run-local <handler_name> path/
 | **Local ARM (M1/M2)** | `run.py <ext> build --local` | `<ext>-lambda-builder:local` (arm64) | not extracted |
 
 - **Deploy Lambda:** `build` then `deploy deploy` (or `deploy deploy --type lambda`). Uses zip.
-- **Deploy ECS:** `build --large` then `deploy deploy --type ecs`. Creates S3 bucket (lifecycle 3 days), ECR, cluster, task definition, and writes **`extensions/<name>/installer/service/ecs_deploy_config.json`** with bucket, cluster, task_definition. Add `subnets` and `security_groups` to that file (or set `ECS_SUBNETS`, `ECS_SECURITY_GROUPS` in env) for Fargate invocations.
+- **Deploy ECS:** Run `setup-iam` once (so the handlers policy exists), then `build --large` and `deploy deploy --type ecs`. The ECS task role gets the same policy as the Lambda role (`<name>-handlers-iam-policy`), so handlers can access S3, etc. Creates S3 bucket (lifecycle 3 days), ECR, cluster, task definition, and writes **`extensions/<name>/installer/service/ecs_deploy_config.json`**. Add `subnets` and `security_groups` to that file (or set `ECS_SUBNETS`, `ECS_SECURITY_GROUPS` in env) for Fargate invocations.
 - **Deploy both (default):** `deploy deploy --type default` deploys Lambda if there are light handlers and ECS if there are ECS handlers (from list).
 
 **ECS config file:** After `deploy --type ecs`, the system reads ECS settings from `ecs_deploy_config.json` when present; env vars (e.g. `ECS_SUBNETS`, `ECS_SECURITY_GROUPS`) override or fill missing keys.
