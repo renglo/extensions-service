@@ -70,17 +70,18 @@ echo ""
 
 # When BUILD_LARGE=1: inject pip install [large-dependencies] and check; no if inside container.
 # When BUILD_LARGE=0: inject zip step. This way the RUN content differs and always runs correctly.
-RUN_ML_LINE=""
+RUN_LARGE_DEPS_LINE=""
 if [[ "$BUILD_LARGE" == "1" ]]; then
-  RUN_ML_LINE='    python3.12 -m pip install --no-cache-dir --target /build/output "/build/package[large-dependencies]" && ( python3.12 -c "import sys; sys.path.insert(0,\"/build/output\"); import numpy; print(\"✓ large-dependencies OK\")" ) || ( echo "ERROR: large-dependencies install failed or numpy missing" >&2; exit 1 ) && \'
+  RUN_LARGE_DEPS_LINE='    python3.12 -m pip install --no-cache-dir --target /build/output "/build/package[large-dependencies]" && ( python3.12 -c "import sys; sys.path.insert(0,\"/build/output\"); import numpy; print(\"✓ large-dependencies OK\")" ) || ( echo "ERROR: large-dependencies install failed or numpy missing" >&2; exit 1 ) && \'
 fi
 if [[ "$BUILD_LARGE" == "1" ]]; then
   RUN_ZIP_LINE='    true && \'
 else
   RUN_ZIP_LINE='    zip -r /build/lambda_deployment.zip . -q && \'
 fi
+echo "DEBUG: BUILD_LARGE=$BUILD_LARGE RUN_LARGE_DEPS_LINE length=${#RUN_LARGE_DEPS_LINE}"
 
-# Dockerfile with EXTENSION_NAME and RUN_ML_LINE/RUN_ZIP_LINE expanded (unquoted heredoc)
+# Dockerfile with EXTENSION_NAME and RUN_LARGE_DEPS_LINE/RUN_ZIP_LINE expanded (unquoted heredoc)
 cat > "$BUILD_DIR/Dockerfile" << DOCKERFILE
 FROM public.ecr.aws/lambda/python:3.12
 
@@ -102,7 +103,7 @@ RUN set -e && \\
     python3.12 -m pip install --no-cache-dir --target /build/output /build/renglo-lib && \\
     python3.12 -m pip install --no-cache-dir build wheel setuptools-scm 2>&1 | tail -5 || true && \\
     python3.12 -c "import tomllib, subprocess, sys; deps=tomllib.load(open('/build/package/pyproject.toml','rb'))['project']['dependencies']; [subprocess.run([sys.executable, '-m', 'pip', 'install', '--no-cache-dir', '--target', '/build/output', d], check=False) or True for d in deps]" 2>&1 | tail -60 && \\
-    $RUN_ML_LINE
+    $RUN_LARGE_DEPS_LINE
     echo "Checking if ${EXTENSION_NAME} package was installed..." && \\
     (test -d /build/output/${EXTENSION_NAME} && echo "  ✓ ${EXTENSION_NAME} directory found" || echo "  ✗ ${EXTENSION_NAME} NOT found - will copy source") && \\
     cp -r /build/package/${EXTENSION_NAME} /build/output/ && \\
