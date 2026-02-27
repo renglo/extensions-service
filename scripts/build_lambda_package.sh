@@ -68,11 +68,17 @@ fi
 echo "==> Using Docker to build Lambda-compatible package..."
 echo ""
 
-# When BUILD_LARGE=1: inject pip install [large-dependencies] and check; no if inside container.
+# When BUILD_LARGE=1: inject pip install [large-dependencies] with retry (wheel-only for wheel_libs.json); no if inside container.
 # When BUILD_LARGE=0: inject zip step. This way the RUN content differs and always runs correctly.
 RUN_LARGE_DEPS_LINE=""
 if [[ "$BUILD_LARGE" == "1" ]]; then
-  RUN_LARGE_DEPS_LINE='    python3.12 -m pip install --no-cache-dir --target /build/output "/build/package[large-dependencies]" && ( python3.12 -c "import sys; sys.path.insert(0,\"/build/output\"); import numpy; print(\"✓ large-dependencies OK\")" ) || ( echo "ERROR: large-dependencies install failed or numpy missing" >&2; exit 1 ) && \'
+  WHEEL_LIBS_FILE="${SCRIPT_DIR}/../wheel_libs.json"
+  PIP_ONLY_BINARY_LIST=""
+  if [[ -f "$WHEEL_LIBS_FILE" ]]; then
+    PIP_ONLY_BINARY_LIST=$(python3 -c "import json; print(','.join(json.load(open('$WHEEL_LIBS_FILE'))))" 2>/dev/null || true)
+  fi
+  # First try: normal pip install. If it fails, retry with PIP_ONLY_BINARY for packages in wheel_libs.json. If both fail, exit 1.
+  RUN_LARGE_DEPS_LINE="    ( python3.12 -m pip install --no-cache-dir --target /build/output \"/build/package[large-dependencies]\" && ( python3.12 -c \"import sys; sys.path.insert(0,\\\"/build/output\\\"); import numpy; print(\\\"✓ large-dependencies OK\\\")\" ) ) || ( PIP_ONLY_BINARY=${PIP_ONLY_BINARY_LIST} python3.12 -m pip install --no-cache-dir --target /build/output \"/build/package[large-dependencies]\" && ( python3.12 -c \"import sys; sys.path.insert(0,\\\"/build/output\\\"); import numpy; print(\\\"✓ large-dependencies OK (wheel retry)\\\")\" ) ) || { echo \"ERROR: large-dependencies install failed or numpy missing\" >&2; exit 1; } && \\"
 fi
 if [[ "$BUILD_LARGE" == "1" ]]; then
   RUN_ZIP_LINE='    true && \'
@@ -101,7 +107,7 @@ RUN set -e && \\
     python3.12 -m pip install --upgrade pip setuptools wheel -q && \\
     mkdir -p /build/output && \\
     python3.12 -m pip install --no-cache-dir --target /build/output /build/renglo-lib && \\
-    python3.12 -m pip install --no-cache-dir build wheel setuptools-scm 2>&1 | tail -5 || true && \\
+    python3.12 -m pip install --no-cache-dir build wheel setuptools-scm 2>&1 && \\
     python3.12 -c "import tomllib, subprocess, sys; deps=tomllib.load(open('/build/package/pyproject.toml','rb'))['project']['dependencies']; [subprocess.run([sys.executable, '-m', 'pip', 'install', '--no-cache-dir', '--target', '/build/output', d], check=False) or True for d in deps]" 2>&1 | tail -60 && \\
     $RUN_LARGE_DEPS_LINE
     echo "Checking if ${EXTENSION_NAME} package was installed..." && \\
