@@ -85,16 +85,12 @@ if ! aws iam get-role --role-name "$TASK_ROLE_NAME" 2>/dev/null; then
 fi
 # Always apply/update inline policy from template (safe: replaces only this policy, no accumulation)
 TASK_POLICY=$(mktemp)
-echo "DEBUG: Applying template: $UTILS_DIR/ecs-task-role-policy.template.json"
 sed -e "s/{{ECS_BUCKET}}/$ECS_BUCKET/g" \
     -e "s/{{AWS_REGION}}/$AWS_REGION/g" \
     -e "s/{{AWS_ACCOUNT}}/$AWS_ACCOUNT/g" \
     -e "s/{{ECR_REPO}}/$ECR_REPO/g" \
     -e "s/{{EXTENSION_NAME}}/$EXTENSION_NAME/g" \
     "$UTILS_DIR/ecs-task-role-policy.template.json" > "$TASK_POLICY"
-echo "DEBUG: Policy document (first 500 chars):"
-head -c 5000 "$TASK_POLICY"
-echo ""
 aws iam put-role-policy --role-name "$TASK_ROLE_NAME" --policy-name "ecs-handlers-s3-ecr" --policy-document "file://$TASK_POLICY"
 rm -f "$TASK_POLICY"
 TASK_ROLE_ARN="arn:aws:iam::${AWS_ACCOUNT}:role/${TASK_ROLE_NAME}"
