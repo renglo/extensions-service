@@ -77,20 +77,26 @@ if ! aws iam get-role --role-name "$EXECUTION_ROLE_NAME" 2>/dev/null; then
 fi
 EXECUTION_ROLE_ARN="arn:aws:iam::${AWS_ACCOUNT}:role/${EXECUTION_ROLE_NAME}"
 
-# Task role (for S3 and ECR get-authorization)
+# Task role (for S3, ECR, and Lambda invoke)
 if ! aws iam get-role --role-name "$TASK_ROLE_NAME" 2>/dev/null; then
   aws iam create-role --role-name "$TASK_ROLE_NAME" \
     --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ecs-tasks.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
-  TASK_POLICY=$(mktemp)
-  sed -e "s/{{ECS_BUCKET}}/$ECS_BUCKET/g" \
-      -e "s/{{AWS_REGION}}/$AWS_REGION/g" \
-      -e "s/{{AWS_ACCOUNT}}/$AWS_ACCOUNT/g" \
-      -e "s/{{ECR_REPO}}/$ECR_REPO/g" \
-      "$UTILS_DIR/ecs-task-role-policy.template.json" > "$TASK_POLICY"
-  aws iam put-role-policy --role-name "$TASK_ROLE_NAME" --policy-name "ecs-handlers-s3-ecr" --policy-document "file://$TASK_POLICY"
-  rm -f "$TASK_POLICY"
   echo "Created task role $TASK_ROLE_NAME"
 fi
+# Always apply/update inline policy from template (safe: replaces only this policy, no accumulation)
+TASK_POLICY=$(mktemp)
+echo "DEBUG: Applying template: $UTILS_DIR/ecs-task-role-policy.template.json"
+sed -e "s/{{ECS_BUCKET}}/$ECS_BUCKET/g" \
+    -e "s/{{AWS_REGION}}/$AWS_REGION/g" \
+    -e "s/{{AWS_ACCOUNT}}/$AWS_ACCOUNT/g" \
+    -e "s/{{ECR_REPO}}/$ECR_REPO/g" \
+    -e "s/{{EXTENSION_NAME}}/$EXTENSION_NAME/g" \
+    "$UTILS_DIR/ecs-task-role-policy.template.json" > "$TASK_POLICY"
+echo "DEBUG: Policy document (first 500 chars):"
+head -c 5000 "$TASK_POLICY"
+echo ""
+aws iam put-role-policy --role-name "$TASK_ROLE_NAME" --policy-name "ecs-handlers-s3-ecr" --policy-document "file://$TASK_POLICY"
+rm -f "$TASK_POLICY"
 TASK_ROLE_ARN="arn:aws:iam::${AWS_ACCOUNT}:role/${TASK_ROLE_NAME}"
 
 # Attach extension handlers policy to task role (same as Lambda: S3, IAM, etc. for handler operations)

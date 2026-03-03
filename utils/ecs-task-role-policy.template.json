@@ -15,6 +15,11 @@
       "Effect": "Allow",
       "Action": ["ecr:BatchCheckLayerAvailability", "ecr:GetDownloadUrlForLayer", "ecr:BatchGetImage"],
       "Resource": "arn:aws:ecr:{{AWS_REGION}}:{{AWS_ACCOUNT}}:repository/{{ECR_REPO}}"
+    },
+    {
+      "Effect": "Allow",
+      "Action": "lambda:InvokeFunction",
+      "Resource": "arn:aws:lambda:{{AWS_REGION}}:{{AWS_ACCOUNT}}:function:{{EXTENSION_NAME}}-handlers"
     }
   ]
 }
