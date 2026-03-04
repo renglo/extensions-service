@@ -11,6 +11,12 @@
       "Status": "Enabled",
       "Filter": { "Prefix": "results/" },
       "Expiration": { "Days": 1 }
+    },
+    {
+      "ID": "ExpireStatus",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "status/" },
+      "Expiration": { "Days": 1 }
     }
   ]
 }
