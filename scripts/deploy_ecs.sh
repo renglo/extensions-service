@@ -114,6 +114,24 @@ sed -e "s|{{ECS_TASK_FAMILY}}|$ECS_TASK_FAMILY|g" \
     -e "s|{{ECR_URI}}|$ECR_URI|g" \
     -e "s|{{AWS_REGION}}|$AWS_REGION|g" \
     "$UTILS_DIR/ecs-task-definition.template.json" > "$TASK_DEF"
+# If extension has ecs_environment.json, merge those env vars into the task definition (like Lambda's Environment.Variables)
+ECS_ENV_FILE="$WORKSPACE_ROOT/extensions/$EXTENSION_NAME/installer/service/ecs_environment.json"
+if [[ -f "$ECS_ENV_FILE" ]]; then
+  TASK_DEF_JSON="$TASK_DEF" ECS_ENV_FILE="$ECS_ENV_FILE" python3 -c "
+import json
+import os
+task_def_path = os.environ['TASK_DEF_JSON']
+env_file = os.environ['ECS_ENV_FILE']
+with open(task_def_path) as f:
+    td = json.load(f)
+with open(env_file) as f:
+    env = json.load(f)
+td['containerDefinitions'][0]['environment'] = [{'name': k, 'value': str(v)} for k, v in env.items()]
+with open(task_def_path, 'w') as f:
+    json.dump(td, f, indent=2)
+"
+  echo "Merged env from ecs_environment.json into task definition"
+fi
 aws logs create-log-group --log-group-name "/ecs/${ECS_TASK_FAMILY}" --region "$AWS_REGION" 2>/dev/null || true
 aws ecs register-task-definition --cli-input-json "file://$TASK_DEF" --region "$AWS_REGION" >/dev/null
 rm -f "$TASK_DEF"

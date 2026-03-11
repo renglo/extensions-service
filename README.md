@@ -82,6 +82,7 @@ Each extension still keeps in `extensions/<name>/installer/service/`:
 - `lambda_config.json` – function name, role, runtime, etc.
 - `<name>-handlers-iam-policy.json` – IAM policy document for `setup-iam`
 - **`ecs_deploy_config.json`** – written by `deploy --type ecs`; the system reads it (and env) for ECS invocations. Add `subnets` and `security_groups` for Fargate.
+- **`ecs_environment.json`** – (optional) per-extension env vars for ECS tasks. Same idea as `lambda_config.json`’s `Environment.Variables`: key-value JSON (e.g. `PYTHONPATH`, `DYNAMODB_ENTITY_TABLE`). If present, `deploy --type ecs` merges it into the task definition container; the file is never overwritten by deploy.
 - Optional: `example_payload.json`, `README.md`
 - **`extensions/<name>/package/handlers_config.json`** – handler name → class mapping (used by `lambda_router.py`)
 
