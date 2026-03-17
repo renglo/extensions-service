@@ -22,6 +22,7 @@ from lib import (
     get_function_name,
     get_package_dir,
     get_ecs_handlers_for_extension,
+    get_extra_extensions,
     list_extensions,
     validate_extension,
 )
@@ -76,12 +77,16 @@ def cmd_build(extension: str, args: list[str]) -> int:
     validate_extension(extension)
     use_local = "--local" in args
     use_large = "--large" in args
+    extra = get_extra_extensions(extension)
     env = {
         "EXTENSION_NAME": extension,
         "WORKSPACE_ROOT": str(get_workspace_root()),
         "EXTENSION_SERVICE_NATIVE_PLATFORM": "1" if use_local else "0",
         "EXTENSION_SERVICE_LARGE_BUILD": "1" if use_large else "0",
+        "EXTRA_EXTENSIONS": ",".join(extra),
     }
+    if extra:
+        print(f"  Extra extensions to bundle: {', '.join(extra)}")
     return _run_script("build_lambda_package.sh", env=env)
 
 
