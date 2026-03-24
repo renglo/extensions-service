@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Deploy extension handlers to ECS (Fargate): S3 bucket + lifecycle, ECR, cluster, task definition.
+# Deploy extension handlers to ECS (Fargate and/or EC2 per extensions/<name>/installer/ecs_profile.json).
 # Requires: EXTENSION_NAME, WORKSPACE_ROOT. Image must exist (run build --large first).
 # Optional env: ECS_RESULTS_BUCKET, ECS_CLUSTER, ECS_TASK_DEFINITION, AWS_REGION, AWS_PROFILE.
 
@@ -12,7 +12,8 @@ fi
 
 WORKSPACE_ROOT="$(cd "$WORKSPACE_ROOT" && pwd)"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-UTILS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)/utils"
+SERVICE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+UTILS_DIR="$SERVICE_ROOT/utils"
 PACKAGE_DIR="$WORKSPACE_ROOT/extensions/$EXTENSION_NAME/package"
 DOCKER_IMAGE="${EXTENSION_NAME}-ecs-builder:latest"
 
@@ -32,6 +33,32 @@ echo "ECS Deployment: $EXTENSION_NAME"
 echo "Bucket: $ECS_BUCKET  Cluster: $ECS_CLUSTER  Task: $ECS_TASK_FAMILY"
 [[ -n "${AWS_PROFILE:-}" ]] && echo "AWS Profile: $AWS_PROFILE"
 echo "=========================================="
+echo ""
+
+PROFILE_ENV=$(mktemp)
+python3 "$SERVICE_ROOT/ecs_profile.py" export-for-deploy "$WORKSPACE_ROOT" "$EXTENSION_NAME" > "$PROFILE_ENV"
+# shellcheck disable=SC1090
+source "$PROFILE_ENV"
+rm -f "$PROFILE_ENV"
+
+ECS_PROFILE_LAUNCH_TYPE="${ECS_PROFILE_LAUNCH_TYPE:-fargate}"
+ECS_PROFILE_NETWORK_MODE="${ECS_PROFILE_NETWORK_MODE:-awsvpc}"
+ECS_PROFILE_TASK_CPU="${ECS_PROFILE_TASK_CPU:-1024}"
+ECS_PROFILE_TASK_MEMORY="${ECS_PROFILE_TASK_MEMORY:-4096}"
+
+echo "ECS profile: launch_type=$ECS_PROFILE_LAUNCH_TYPE network_mode=$ECS_PROFILE_NETWORK_MODE cpu=$ECS_PROFILE_TASK_CPU memory=$ECS_PROFILE_TASK_MEMORY"
+echo ""
+
+TASK_DEF_TEMPLATE="$UTILS_DIR/ecs-task-definition.template.json"
+if [[ "$ECS_PROFILE_LAUNCH_TYPE" == "ec2" ]]; then
+  case "$ECS_PROFILE_NETWORK_MODE" in
+    bridge) TASK_DEF_TEMPLATE="$UTILS_DIR/ecs-task-definition-ec2-bridge.template.json" ;;
+    host) TASK_DEF_TEMPLATE="$UTILS_DIR/ecs-task-definition-ec2-host.template.json" ;;
+    awsvpc) TASK_DEF_TEMPLATE="$UTILS_DIR/ecs-task-definition-ec2-awsvpc.template.json" ;;
+    *) echo "ERROR: Unknown ECS network_mode $ECS_PROFILE_NETWORK_MODE" >&2; exit 1 ;;
+  esac
+fi
+echo "Task definition template: $(basename "$TASK_DEF_TEMPLATE")"
 echo ""
 
 if ! docker image inspect "$DOCKER_IMAGE" >/dev/null 2>&1; then
@@ -113,7 +140,9 @@ sed -e "s|{{ECS_TASK_FAMILY}}|$ECS_TASK_FAMILY|g" \
     -e "s|{{TASK_ROLE_ARN}}|$TASK_ROLE_ARN|g" \
     -e "s|{{ECR_URI}}|$ECR_URI|g" \
     -e "s|{{AWS_REGION}}|$AWS_REGION|g" \
-    "$UTILS_DIR/ecs-task-definition.template.json" > "$TASK_DEF"
+    -e "s|{{TASK_CPU}}|$ECS_PROFILE_TASK_CPU|g" \
+    -e "s|{{TASK_MEMORY}}|$ECS_PROFILE_TASK_MEMORY|g" \
+    "$TASK_DEF_TEMPLATE" > "$TASK_DEF"
 # If extension has ecs_environment.json, merge those env vars into the task definition (like Lambda's Environment.Variables)
 ECS_ENV_FILE="$WORKSPACE_ROOT/extensions/$EXTENSION_NAME/installer/service/ecs_environment.json"
 if [[ -f "$ECS_ENV_FILE" ]]; then
@@ -139,6 +168,8 @@ echo "Registered task definition $ECS_TASK_FAMILY"
 
 echo "==> ECS deploy config..."
 export ECS_BUCKET ECS_CLUSTER ECS_TASK_FAMILY AWS_REGION
+export ECS_LAUNCH_TYPE="$ECS_PROFILE_LAUNCH_TYPE"
+export ECS_NETWORK_MODE="$ECS_PROFILE_NETWORK_MODE"
 "$SCRIPT_DIR/write_ecs_deploy_config.sh"
 
 echo ""

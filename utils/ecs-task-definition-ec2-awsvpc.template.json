@@ -1,7 +1,7 @@
 {
   "family": "{{ECS_TASK_FAMILY}}",
   "networkMode": "awsvpc",
-  "requiresCompatibilities": ["FARGATE"],
+  "requiresCompatibilities": ["EC2"],
   "cpu": "{{TASK_CPU}}",
   "memory": "{{TASK_MEMORY}}",
   "executionRoleArn": "{{EXECUTION_ROLE_ARN}}",
