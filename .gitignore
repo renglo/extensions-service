@@ -65,3 +65,8 @@ Thumbs.db
 temp/
 tmp/
 
+# Per-extension runtime state (generated locally / CI); keep schema files
+state/*
+!state/schemas/
+!state/schemas/**
+

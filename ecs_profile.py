@@ -149,8 +149,13 @@ def maybe_warn_instance_vs_task(profile: dict[str, Any]) -> None:
 
 
 def build_profile_for_deploy(workspace_root: str | Path, extension: str) -> dict[str, Any]:
-    path = profile_path(workspace_root, extension)
-    raw = load_profile(path)
+    from state_store import get_state_paths
+
+    state_path = get_state_paths(extension, workspace_root).runtime_profile
+    raw = load_profile(state_path)
+    if not raw:
+        path = profile_path(workspace_root, extension)
+        raw = load_profile(path)
     if not raw:
         data = default_profile()
     else:

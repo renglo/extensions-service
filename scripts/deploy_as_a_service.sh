@@ -12,10 +12,35 @@ fi
 WORKSPACE_ROOT="$(cd "$WORKSPACE_ROOT" && pwd)"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PACKAGE_DIR="$WORKSPACE_ROOT/extensions/$EXTENSION_NAME/package"
-SERVICE_DIR="$WORKSPACE_ROOT/extensions/$EXTENSION_NAME/installer/service"
-LAMBDA_CONFIG="$SERVICE_DIR/lambda_config.json"
 BUILD_SCRIPT="$SCRIPT_DIR/build_lambda_package.sh"
 DEPLOYMENT_ZIP="$PACKAGE_DIR/lambda_deployment.zip"
+GENERATED_LAMBDA_CONFIG=""
+
+if [[ -n "${DEPLOY_INPUT_FILE:-}" && -f "${DEPLOY_INPUT_FILE}" ]]; then
+  GENERATED_LAMBDA_CONFIG=$(mktemp)
+  DEPLOY_INPUT_FILE="$DEPLOY_INPUT_FILE" OUTPUT_FILE="$GENERATED_LAMBDA_CONFIG" python3 -c "
+import json, os, sys
+src = os.environ['DEPLOY_INPUT_FILE']
+out = os.environ['OUTPUT_FILE']
+data = json.load(open(src, encoding='utf-8'))
+cfg = data.get('lambda_config')
+if not isinstance(cfg, dict):
+    print(f'ERROR: lambda_config missing in {src}', file=sys.stderr)
+    sys.exit(1)
+json.dump(cfg, open(out, 'w', encoding='utf-8'), indent=2)
+"
+  LAMBDA_CONFIG="$GENERATED_LAMBDA_CONFIG"
+elif [[ -n "${LAMBDA_CONFIG_FILE:-}" && -f "${LAMBDA_CONFIG_FILE}" ]]; then
+  LAMBDA_CONFIG="$LAMBDA_CONFIG_FILE"
+else
+  echo "ERROR: Set DEPLOY_INPUT_FILE (state/<ext>/deploy_input.json) or LAMBDA_CONFIG_FILE to a Lambda CLI JSON payload." >&2
+  exit 1
+fi
+
+cleanup() {
+  [[ -n "$GENERATED_LAMBDA_CONFIG" && -f "$GENERATED_LAMBDA_CONFIG" ]] && rm -f "$GENERATED_LAMBDA_CONFIG"
+}
+trap cleanup EXIT
 
 FUNCTION_NAME=$(python3 -c "import json; print(json.load(open('$LAMBDA_CONFIG'))['FunctionName'])")
 ACTION="${1:-deploy}"
@@ -88,7 +113,7 @@ with open('$TEMP_CONFIG', 'w') as f:
 if [[ "$ACTION" == "deploy" ]]; then
   if ! aws iam get-role --role-name "$ROLE_FROM_CONFIG" >/dev/null 2>&1; then
     echo "ERROR: IAM role '$ROLE_FROM_CONFIG' does not exist or Lambda cannot assume it." >&2
-    echo "       Run this first: python3 dev/extension-service/run.py $EXTENSION_NAME setup-iam" >&2
+    echo "       Run this first: python3 dev/extensions-service/run.py $EXTENSION_NAME setup-iam" >&2
     rm -f "$TEMP_CONFIG"
     exit 1
   fi

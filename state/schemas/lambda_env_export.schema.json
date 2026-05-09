@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ExtensionServiceLambdaEnvExport",
+  "type": "object",
+  "required": ["state_version", "extension", "updated_at", "environment"],
+  "properties": {
+    "state_version": { "type": "integer" },
+    "extension": { "type": "string" },
+    "updated_at": { "type": "string" },
+    "environment": {
+      "type": "object",
+      "required": ["ECS_RESULTS_BUCKET", "ECS_CLUSTER", "ECS_TASK_DEFINITION"],
+      "properties": {
+        "ECS_RESULTS_BUCKET": { "type": "string" },
+        "ECS_CLUSTER": { "type": "string" },
+        "ECS_TASK_DEFINITION": { "type": "string" },
+        "ECS_SUBNETS": { "type": "string" },
+        "ECS_SECURITY_GROUPS": { "type": "string" },
+        "ECS_LAUNCH_TYPE": { "type": "string" },
+        "ECS_NETWORK_MODE": { "type": "string" }
+      }
+    }
+  }
+}

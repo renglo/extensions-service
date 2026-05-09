@@ -1,9 +1,9 @@
 """
 Path and config helpers for extension service.
-Expects to run from workspace root; paths are relative to extensions/<name>/installer/service.
+Extensions are identified by extensions/<name>/package (handler code).
+Deploy configuration lives in dev/extensions-service/state/<name>/deploy_input.json.
 """
 from pathlib import Path
-import json
 
 
 def get_workspace_root() -> Path:
@@ -23,8 +23,7 @@ def get_script_dir() -> Path:
 
 def list_extensions(workspace_root: Path | None = None) -> list[str]:
     """
-    List extension names that have installer/service with lambda_config.json
-    (i.e. support build/deploy/setup-iam/run-local/view-logs/test).
+    List extension names that have a package directory under extensions/<name>/package.
     """
     root = workspace_root or get_workspace_root()
     exts = []
@@ -33,33 +32,52 @@ def list_extensions(workspace_root: Path | None = None) -> list[str]:
         return exts
     for path in ext_dir.iterdir():
         if path.is_dir() and not path.name.startswith("."):
-            cfg = path / "installer" / "service" / "lambda_config.json"
-            if cfg.is_file():
+            if (path / "package").is_dir():
                 exts.append(path.name)
     return sorted(exts)
 
 
 def validate_extension(extension: str, workspace_root: Path | None = None) -> Path:
     """
-    Return the installer/service directory for the extension.
-    Raises FileNotFoundError if extension or lambda_config.json is missing.
+    Ensure extensions/<extension>/package exists (handler source for build/run).
+    Returns the package directory path.
     """
     root = workspace_root or get_workspace_root()
-    service_dir = root / "extensions" / extension / "installer" / "service"
-    if not service_dir.is_dir():
-        raise FileNotFoundError(f"Extension not found or missing installer/service: {extension}")
-    cfg = service_dir / "lambda_config.json"
-    if not cfg.is_file():
-        raise FileNotFoundError(f"Extension missing lambda_config.json: {extension}")
-    return service_dir
+    pkg = root / "extensions" / extension / "package"
+    if not pkg.is_dir():
+        raise FileNotFoundError(f"Extension not found or missing package directory: {extension}")
+    return pkg
 
 
 def get_function_name(extension: str, workspace_root: Path | None = None) -> str:
-    """Read Lambda function name from extension's lambda_config.json."""
-    service_dir = validate_extension(extension, workspace_root)
-    with open(service_dir / "lambda_config.json") as f:
-        config = json.load(f)
-    return config.get("FunctionName", f"{extension}-handlers")
+    """Read Lambda function name from deploy_input.lambda_config."""
+    # Local import avoids circular dependency at module load time.
+    from deploy_input import load_lambda_config_from_deploy_input
+
+    lc = load_lambda_config_from_deploy_input(extension, workspace_root)
+    if not lc:
+        raise FileNotFoundError(
+            f"No deploy_input for {extension}: set DEPLOY_INPUT_FILE or create "
+            f"dev/extensions-service/state/{extension}/deploy_input.json"
+        )
+    return lc.get("FunctionName", f"{extension}-handlers")
+
+
+def get_handlers_iam_policy_path(extension: str, workspace_root: Path | None = None) -> Path:
+    """Path to IAM policy JSON used by setup_iam_role.sh (committed under installer/service)."""
+    root = workspace_root or get_workspace_root()
+    service_dir = root / "extensions" / extension / "installer" / "service"
+    return service_dir / f"{extension}-handlers-iam-policy.json"
+
+
+def validate_iam_policy_file(extension: str, workspace_root: Path | None = None) -> Path:
+    """Ensure handlers IAM policy file exists."""
+    policy = get_handlers_iam_policy_path(extension, workspace_root)
+    if not policy.is_file():
+        raise FileNotFoundError(
+            f"IAM policy file not found for {extension}: {policy}"
+        )
+    return policy
 
 
 def get_package_dir(extension: str, workspace_root: Path | None = None) -> Path:

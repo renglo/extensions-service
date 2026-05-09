@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from ecs_profile import ensure_default_profile
+from provision_infra import cmd_apply as provision_apply, cmd_destroy as provision_destroy
 from lib import (
     get_script_dir,
     get_workspace_root,
@@ -26,7 +26,11 @@ from lib import (
     get_extra_extensions,
     list_extensions,
     validate_extension,
+    validate_iam_policy_file,
 )
+from deploy_flow import cmd_build as deploy_build, cmd_publish as deploy_publish, cmd_push as deploy_push
+from deploy_input import resolve_deploy_input_file
+from runtime_config import cmd_export_lambda_env, cmd_set_profile, ensure_runtime_profile_file
 
 
 def _parse_profile_and_filter_args(args: list[str]) -> tuple[str | None, list[str]]:
@@ -66,9 +70,9 @@ def _run_script(script_name: str, env: dict | None = None, extra_args: list[str]
 def cmd_list(_args: list[str]) -> int:
     exts = list_extensions()
     if not exts:
-        print("No extensions with installer/service (lambda_config.json) found.")
+        print("No extensions with extensions/<name>/package found.")
         return 0
-    print("Extensions with handler Lambda service:")
+    print("Extensions with package/ directory:")
     for e in exts:
         print(f"  {e}")
     return 0
@@ -76,19 +80,7 @@ def cmd_list(_args: list[str]) -> int:
 
 def cmd_build(extension: str, args: list[str]) -> int:
     validate_extension(extension)
-    use_local = "--local" in args
-    use_large = "--large" in args
-    extra = get_extra_extensions(extension)
-    env = {
-        "EXTENSION_NAME": extension,
-        "WORKSPACE_ROOT": str(get_workspace_root()),
-        "EXTENSION_SERVICE_NATIVE_PLATFORM": "1" if use_local else "0",
-        "EXTENSION_SERVICE_LARGE_BUILD": "1" if use_large else "0",
-        "EXTRA_EXTENSIONS": ",".join(extra),
-    }
-    if extra:
-        print(f"  Extra extensions to bundle: {', '.join(extra)}")
-    return _run_script("build_lambda_package.sh", env=env)
+    return deploy_build(extension, args)
 
 
 def _parse_deploy_type(args: list[str]) -> tuple[str, list[str]]:
@@ -119,10 +111,15 @@ def cmd_deploy(extension: str, args: list[str]) -> int:
     }
     if profile is not None:
         env["AWS_PROFILE"] = profile
+    deploy_input = resolve_deploy_input_file(extension, get_workspace_root())
+    if deploy_input is not None:
+        env["DEPLOY_INPUT_FILE"] = str(deploy_input)
 
     if deploy_type == "ecs":
-        ensure_default_profile(get_workspace_root(), extension)
-        return _run_script("deploy_ecs.sh", env=env)
+        rc = deploy_push(extension, filtered_args + ([f"--profile={profile}"] if profile else []))
+        if rc != 0:
+            return rc
+        return deploy_publish(extension, ["--type", "ecs"])
     if deploy_type == "default":
         ecs_handlers = get_ecs_handlers_for_extension(extension)
         root = get_workspace_root()
@@ -140,8 +137,10 @@ def cmd_deploy(extension: str, args: list[str]) -> int:
             if rc != 0:
                 return rc
         if deploy_ecs:
-            ensure_default_profile(get_workspace_root(), extension)
-            return _run_script("deploy_ecs.sh", env=env)
+            rc = deploy_push(extension, filtered_args + ([f"--profile={profile}"] if profile else []))
+            if rc != 0:
+                return rc
+            return deploy_publish(extension, ["--type", "ecs"])
         return 0
 
     return _run_script("deploy_as_a_service.sh", env=env, extra_args=filtered_args)
@@ -149,6 +148,7 @@ def cmd_deploy(extension: str, args: list[str]) -> int:
 
 def cmd_setup_iam(extension: str, args: list[str]) -> int:
     validate_extension(extension)
+    validate_iam_policy_file(extension, get_workspace_root())
     profile, _ = _parse_profile_and_filter_args(args)
     env = {
         "EXTENSION_NAME": extension,
@@ -163,7 +163,7 @@ def cmd_provision_ecs_capacity(extension: str, args: list[str]) -> int:
     """Provision EC2 capacity for ECS (ASG + capacity provider)."""
     validate_extension(extension)
     profile, _ = _parse_profile_and_filter_args(args)
-    ensure_default_profile(get_workspace_root(), extension)
+    ensure_runtime_profile_file(extension, get_workspace_root())
     env = {
         "EXTENSION_NAME": extension,
         "WORKSPACE_ROOT": str(get_workspace_root()),
@@ -206,19 +206,70 @@ def cmd_view_logs(extension: str, args: list[str]) -> int:
         "EXTENSION_NAME": extension,
         "WORKSPACE_ROOT": str(get_workspace_root()),
     }
+    deploy_input = resolve_deploy_input_file(extension, get_workspace_root())
+    if deploy_input is not None:
+        env["DEPLOY_INPUT_FILE"] = str(deploy_input)
+    try:
+        env["LAMBDA_FUNCTION_NAME"] = get_function_name(extension)
+    except FileNotFoundError:
+        pass
     if profile is not None:
         env["AWS_PROFILE"] = profile
     return _run_script("view_lambda_logs.sh", env=env, extra_args=filtered_args)
 
 
 def cmd_ecs_profile(extension: str, args: list[str]) -> int:
-    """Create or update extensions/<ext>/installer/ecs_profile.json (merge unless --force)."""
+    """Compatibility wrapper: runtime set-profile."""
     validate_extension(extension)
     _profile_aws, rest = _parse_profile_and_filter_args(args)
-    root = str(get_workspace_root())
-    ecs_profile_script = Path(__file__).resolve().parent / "ecs_profile.py"
-    cmd = [sys.executable, str(ecs_profile_script), "apply", root, extension, *rest]
-    return subprocess.run(cmd, cwd=root).returncode
+    return cmd_set_profile(extension, rest)
+
+
+def cmd_provision_infra(extension: str, args: list[str]) -> int:
+    validate_extension(extension)
+    if not args:
+        print("Usage: run.py <ext> provision-infra apply|destroy [args...]", file=sys.stderr)
+        return 1
+    action = args[0].lower()
+    rest = args[1:]
+    if action == "apply":
+        return provision_apply(extension, rest)
+    if action == "destroy":
+        return provision_destroy(extension, rest)
+    print(f"Unknown provision-infra action: {action}", file=sys.stderr)
+    return 1
+
+
+def cmd_deploy_flow(extension: str, args: list[str]) -> int:
+    validate_extension(extension)
+    if not args:
+        print("Usage: run.py <ext> deploy build|push|publish [args...]", file=sys.stderr)
+        return 1
+    action = args[0].lower()
+    rest = args[1:]
+    if action == "build":
+        return deploy_build(extension, rest)
+    if action == "push":
+        return deploy_push(extension, rest)
+    if action == "publish":
+        return deploy_publish(extension, rest)
+    print(f"Unknown deploy action: {action}", file=sys.stderr)
+    return 1
+
+
+def cmd_runtime(extension: str, args: list[str]) -> int:
+    validate_extension(extension)
+    if not args:
+        print("Usage: run.py <ext> runtime set-profile|export-lambda-env [args...]", file=sys.stderr)
+        return 1
+    action = args[0].lower()
+    rest = args[1:]
+    if action == "set-profile":
+        return cmd_set_profile(extension, rest)
+    if action == "export-lambda-env":
+        return cmd_export_lambda_env(extension, rest)
+    print(f"Unknown runtime action: {action}", file=sys.stderr)
+    return 1
 
 
 def cmd_test(extension: str, args: list[str]) -> int:
@@ -244,9 +295,9 @@ def main() -> int:
         print("Usage: run.py <extension> <action> [action_args...]", file=sys.stderr)
         print("       run.py list", file=sys.stderr)
         print("", file=sys.stderr)
-        print("Actions: build, deploy, setup-iam, ecs-profile, provision-ecs-capacity, undeploy-ecs-capacity, run-local, view-logs, test", file=sys.stderr)
+        print("Actions: list, provision-infra, deploy, runtime, build, setup-iam, ecs-profile, provision-ecs-capacity, undeploy-ecs-capacity, run-local, view-logs, test", file=sys.stderr)
         print("  build       Build package (Docker). --local = arm64 for run-local; --large = ECS image with [large-dependencies] extra; omit = Lambda zip.", file=sys.stderr)
-        print("  deploy      deploy | update | undeploy  (e.g. deploy deploy --clean). --type lambda|ecs|default (default = lambda)", file=sys.stderr)
+        print("  deploy      build|push|publish (new) OR deploy|update|undeploy (legacy lambda service).", file=sys.stderr)
         print("  ecs-profile ECS sizing / Fargate vs EC2: --small|--medium|--large, --launch-type fargate|ec2, --network-mode ..., --force", file=sys.stderr)
         print("  provision-ecs-capacity  Create/update ECS EC2 capacity (instance role/profile, launch template, ASG, capacity provider)", file=sys.stderr)
         print("  undeploy-ecs-capacity   Full cleanup of ECS EC2 capacity (set ASG 0 and remove ASG/LT/capacity-provider/instance role)", file=sys.stderr)
@@ -254,6 +305,8 @@ def main() -> int:
         print("  run-local   Run a handler locally (Docker). Uses :local image if present (from build --local), else :latest. Args: <handler_name> [payload.json] [--rebuild]", file=sys.stderr)
         print("  view-logs   Tail CloudWatch logs. Optional: --follow, --filter PATTERN, --hours N, --profile NAME", file=sys.stderr)
         print("  test        Invoke handler on AWS Lambda. Args: <handler_name> [--payload-file file.json] [--profile NAME]", file=sys.stderr)
+        print("  provision-infra apply|destroy infrastructure baseline and refresh state manifest.", file=sys.stderr)
+        print("  runtime     set-profile|export-lambda-env into local state source of truth.", file=sys.stderr)
         return 1
 
     if sys.argv[1].lower() == "list":
@@ -268,6 +321,8 @@ def main() -> int:
     rest = sys.argv[3:]
 
     handlers = {
+        "provision-infra": cmd_provision_infra,
+        "runtime": cmd_runtime,
         "build": cmd_build,
         "deploy": cmd_deploy,
         "setup-iam": cmd_setup_iam,
@@ -280,9 +335,13 @@ def main() -> int:
     }
     if action not in handlers:
         print(f"Unknown action: {action}", file=sys.stderr)
-        print("Actions: build, deploy, setup-iam, ecs-profile, provision-ecs-capacity, undeploy-ecs-capacity, run-local, view-logs, test", file=sys.stderr)
+        print("Actions: list, provision-infra, deploy, runtime, build, setup-iam, ecs-profile, provision-ecs-capacity, undeploy-ecs-capacity, run-local, view-logs, test", file=sys.stderr)
         return 1
 
+    if action == "deploy":
+        if rest and rest[0].lower() in {"build", "push", "publish"}:
+            return cmd_deploy_flow(extension, rest)
+        return cmd_deploy(extension, rest)
     return handlers[action](extension, rest)
 
 

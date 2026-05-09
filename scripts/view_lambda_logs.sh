@@ -9,8 +9,14 @@ if [[ -z "${EXTENSION_NAME:-}" || -z "${WORKSPACE_ROOT:-}" ]]; then
   exit 1
 fi
 
-LAMBDA_CONFIG="$WORKSPACE_ROOT/extensions/$EXTENSION_NAME/installer/service/lambda_config.json"
-FUNCTION_NAME=$(python3 -c "import json; print(json.load(open('$LAMBDA_CONFIG'))['FunctionName'])")
+if [[ -n "${LAMBDA_FUNCTION_NAME:-}" ]]; then
+  FUNCTION_NAME="$LAMBDA_FUNCTION_NAME"
+elif [[ -n "${DEPLOY_INPUT_FILE:-}" && -f "${DEPLOY_INPUT_FILE}" ]]; then
+  FUNCTION_NAME=$(python3 -c "import json, os; d=json.load(open(os.environ['DEPLOY_INPUT_FILE'],encoding='utf-8')); print(d['lambda_config']['FunctionName'])")
+else
+  echo "ERROR: Set LAMBDA_FUNCTION_NAME or DEPLOY_INPUT_FILE (path to deploy_input.json)" >&2
+  exit 1
+fi
 LOG_GROUP="/aws/lambda/${FUNCTION_NAME}"
 AWS_REGION="${AWS_REGION:-us-east-1}"
 FOLLOW=false

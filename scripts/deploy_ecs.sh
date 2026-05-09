@@ -36,7 +36,18 @@ echo "=========================================="
 echo ""
 
 PROFILE_ENV=$(mktemp)
-python3 "$SERVICE_ROOT/ecs_profile.py" export-for-deploy "$WORKSPACE_ROOT" "$EXTENSION_NAME" > "$PROFILE_ENV"
+if [[ -n "${ECS_PROFILE_FILE:-}" && -f "${ECS_PROFILE_FILE}" ]]; then
+  ECS_PROFILE_FILE="$ECS_PROFILE_FILE" python3 -c "
+import json, os
+data = json.load(open(os.environ['ECS_PROFILE_FILE'], encoding='utf-8'))
+print(f\"ECS_PROFILE_LAUNCH_TYPE={data.get('launch_type','fargate')}\")
+print(f\"ECS_PROFILE_NETWORK_MODE={data.get('network_mode','awsvpc')}\")
+print(f\"ECS_PROFILE_TASK_CPU={data.get('task_cpu',1024)}\")
+print(f\"ECS_PROFILE_TASK_MEMORY={data.get('task_memory',4096)}\")
+" > "$PROFILE_ENV"
+else
+  python3 "$SERVICE_ROOT/ecs_profile.py" export-for-deploy "$WORKSPACE_ROOT" "$EXTENSION_NAME" > "$PROFILE_ENV"
+fi
 # shellcheck disable=SC1090
 source "$PROFILE_ENV"
 rm -f "$PROFILE_ENV"
@@ -143,10 +154,27 @@ sed -e "s|{{ECS_TASK_FAMILY}}|$ECS_TASK_FAMILY|g" \
     -e "s|{{TASK_CPU}}|$ECS_PROFILE_TASK_CPU|g" \
     -e "s|{{TASK_MEMORY}}|$ECS_PROFILE_TASK_MEMORY|g" \
     "$TASK_DEF_TEMPLATE" > "$TASK_DEF"
-# If extension has ecs_environment.json, merge those env vars into the task definition (like Lambda's Environment.Variables)
-ECS_ENV_FILE="$WORKSPACE_ROOT/extensions/$EXTENSION_NAME/installer/service/ecs_environment.json"
-if [[ -f "$ECS_ENV_FILE" ]]; then
-  TASK_DEF_JSON="$TASK_DEF" ECS_ENV_FILE="$ECS_ENV_FILE" python3 -c "
+# Task env: optional ecs_environment in DEPLOY_INPUT_FILE, or ECS_ENV_FILE (path to JSON object of name/value)
+GENERATED_ECS_ENV_FILE=""
+ECS_ENV_FILE_MERGE=""
+if [[ -n "${DEPLOY_INPUT_FILE:-}" && -f "${DEPLOY_INPUT_FILE}" ]]; then
+  GENERATED_ECS_ENV_FILE=$(mktemp)
+  DEPLOY_INPUT_FILE="$DEPLOY_INPUT_FILE" OUTPUT_FILE="$GENERATED_ECS_ENV_FILE" python3 -c "
+import json, os
+src = os.environ['DEPLOY_INPUT_FILE']
+out = os.environ['OUTPUT_FILE']
+data = json.load(open(src, encoding='utf-8'))
+env = data.get('ecs_environment', {})
+if not isinstance(env, dict):
+    env = {}
+json.dump(env, open(out, 'w', encoding='utf-8'), indent=2)
+"
+  ECS_ENV_FILE_MERGE="$GENERATED_ECS_ENV_FILE"
+elif [[ -n "${ECS_ENV_FILE:-}" && -f "${ECS_ENV_FILE}" ]]; then
+  ECS_ENV_FILE_MERGE="$ECS_ENV_FILE"
+fi
+if [[ -n "$ECS_ENV_FILE_MERGE" && -f "$ECS_ENV_FILE_MERGE" ]]; then
+  TASK_DEF_JSON="$TASK_DEF" ECS_ENV_FILE="$ECS_ENV_FILE_MERGE" python3 -c "
 import json
 import os
 task_def_path = os.environ['TASK_DEF_JSON']
@@ -159,7 +187,7 @@ td['containerDefinitions'][0]['environment'] = [{'name': k, 'value': str(v)} for
 with open(task_def_path, 'w') as f:
     json.dump(td, f, indent=2)
 "
-  echo "Merged env from ecs_environment.json into task definition"
+  echo "Merged container environment from deploy input / ECS_ENV_FILE into task definition"
 fi
 aws logs create-log-group --log-group-name "/ecs/${ECS_TASK_FAMILY}" --region "$AWS_REGION" 2>/dev/null || true
 aws ecs register-task-definition --cli-input-json "file://$TASK_DEF" --region "$AWS_REGION" >/dev/null
@@ -175,3 +203,4 @@ export ECS_NETWORK_MODE="$ECS_PROFILE_NETWORK_MODE"
 echo ""
 echo "Deploy complete. ECS config written to extensions/$EXTENSION_NAME/installer/service/ecs_deploy_config.json"
 echo ""
+[[ -n "$GENERATED_ECS_ENV_FILE" && -f "$GENERATED_ECS_ENV_FILE" ]] && rm -f "$GENERATED_ECS_ENV_FILE"
