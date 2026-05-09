@@ -66,3 +66,76 @@ def get_package_dir(extension: str, workspace_root: Path | None = None) -> Path:
     """Return extensions/<extension>/package directory."""
     root = workspace_root or get_workspace_root()
     return root / "extensions" / extension / "package"
+
+
+def get_extra_extensions(primary_extension: str, workspace_root: Path | None = None) -> list[str]:
+    """
+    Parse EXTERNAL_HANDLERS from env or system/env_config.py.
+    Format: comma-separated extension names, e.g. "extension-1,extension-2".
+    Returns the extra extensions to bundle alongside the primary one (primary excluded).
+    Only extensions that have a package directory are included.
+    """
+    import os
+    raw = os.environ.get("EXTERNAL_HANDLERS", "")
+    if not raw:
+        root = workspace_root or get_workspace_root()
+        env_config = root / "system" / "env_config.py"
+        if env_config.is_file():
+            try:
+                with open(env_config) as f:
+                    for line in f:
+                        stripped = line.strip()
+                        # Match exactly EXTERNAL_HANDLERS (not EXTERNAL_HANDLERS_ECS_HANDLERS etc.)
+                        if stripped.startswith("EXTERNAL_HANDLERS") and "=" in stripped:
+                            key = stripped.split("=", 1)[0].strip()
+                            if key == "EXTERNAL_HANDLERS":
+                                raw = stripped.split("=", 1)[1].strip().strip("'\"").strip()
+                                break
+            except Exception:
+                pass
+    if not raw:
+        return []
+    root = workspace_root or get_workspace_root()
+    result = []
+    for e in raw.split(","):
+        e = e.strip()
+        if not e or e.lower() == primary_extension.lower():
+            continue
+        pkg_dir = root / "extensions" / e / "package"
+        if not pkg_dir.is_dir():
+            print(f"WARNING: EXTERNAL_HANDLERS includes '{e}' but extensions/{e}/package not found — skipping.")
+            continue
+        result.append(e)
+    return result
+
+
+def get_ecs_handlers_for_extension(extension: str, workspace_root: Path | None = None) -> list[str]:
+    """
+    Parse EXTERNAL_HANDLERS_ECS_HANDLERS from env or system/env_config.py.
+    Format: "ext1:handler1,handler2;ext2:handler3". Returns list of handler names for this extension.
+    """
+    import os
+    raw = os.environ.get("EXTERNAL_HANDLERS_ECS_HANDLERS", "")
+    if not raw:
+        root = workspace_root or get_workspace_root()
+        env_config = root / "system" / "env_config.py"
+        if env_config.is_file():
+            try:
+                with open(env_config) as f:
+                    for line in f:
+                        if "EXTERNAL_HANDLERS_ECS_HANDLERS" in line and "=" in line:
+                            # Parse Python assignment: EXTERNAL_HANDLERS_ECS_HANDLERS = '...'
+                            raw = line.split("=", 1)[1].strip().strip("'\"").strip()
+                            break
+            except Exception:
+                pass
+    result = []
+    for part in raw.split(";"):
+        part = part.strip()
+        if ":" not in part:
+            continue
+        ext, handlers_str = part.split(":", 1)
+        if ext.strip().lower() == extension.lower():
+            result = [h.strip().lower() for h in handlers_str.split(",") if h.strip()]
+            break
+    return result

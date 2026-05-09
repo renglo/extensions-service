@@ -1,0 +1,22 @@
+{
+  "Rules": [
+    {
+      "ID": "ExpirePayloadsAndResults",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "payloads/" },
+      "Expiration": { "Days": 1 }
+    },
+    {
+      "ID": "ExpireResults",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "results/" },
+      "Expiration": { "Days": 1 }
+    },
+    {
+      "ID": "ExpireStatus",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "status/" },
+      "Expiration": { "Days": 1 }
+    }
+  ]
+}

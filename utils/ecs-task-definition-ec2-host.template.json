@@ -1,0 +1,24 @@
+{
+  "family": "{{ECS_TASK_FAMILY}}",
+  "networkMode": "host",
+  "requiresCompatibilities": ["EC2"],
+  "cpu": "{{TASK_CPU}}",
+  "memory": "{{TASK_MEMORY}}",
+  "executionRoleArn": "{{EXECUTION_ROLE_ARN}}",
+  "taskRoleArn": "{{TASK_ROLE_ARN}}",
+  "containerDefinitions": [
+    {
+      "name": "handler",
+      "image": "{{ECR_URI}}",
+      "essential": true,
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/{{ECS_TASK_FAMILY}}",
+          "awslogs-region": "{{AWS_REGION}}",
+          "awslogs-stream-prefix": "ecs"
+        }
+      }
+    }
+  ]
+}
