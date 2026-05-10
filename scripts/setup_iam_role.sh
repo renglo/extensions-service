@@ -58,5 +58,5 @@ aws iam attach-role-policy --role-name "$ROLE_NAME" --policy-arn "arn:aws:iam::a
 
 echo ""
 echo "Done. Role ARN: arn:aws:iam::${AWS_ACCOUNT}:role/${ROLE_NAME}"
-echo "Deploy: python3 dev/extension-service/run.py $EXTENSION_NAME deploy"
+echo "Deploy: python3 run.py $EXTENSION_NAME deploy"
 echo ""

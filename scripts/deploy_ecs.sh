@@ -73,7 +73,7 @@ echo "Task definition template: $(basename "$TASK_DEF_TEMPLATE")"
 echo ""
 
 if ! docker image inspect "$DOCKER_IMAGE" >/dev/null 2>&1; then
-  echo "ERROR: Docker image $DOCKER_IMAGE not found. Run: python3 dev/extensions-service/run.py $EXTENSION_NAME build --large" >&2
+  echo "ERROR: Docker image $DOCKER_IMAGE not found. Run: python3 run.py $EXTENSION_NAME build --large" >&2
   exit 1
 fi
 
@@ -141,7 +141,7 @@ if aws iam get-policy --policy-arn "$HANDLERS_POLICY_ARN" >/dev/null 2>&1; then
   echo "Attached $HANDLERS_POLICY_NAME to task role (same as Lambda handlers)"
 else
   echo "WARNING: Policy $HANDLERS_POLICY_NAME not found. ECS task will only have ECS bucket + ECR access." >&2
-  echo "         Run: python3 dev/extensions-service/run.py $EXTENSION_NAME setup-iam" >&2
+  echo "         Run: python3 run.py $EXTENSION_NAME setup-iam" >&2
 fi
 
 echo "==> Task definition..."

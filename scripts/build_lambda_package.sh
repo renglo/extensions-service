@@ -5,7 +5,7 @@ set -euo pipefail
 # Requires: EXTENSION_NAME, WORKSPACE_ROOT in environment (set by run.py).
 
 if [[ -z "${EXTENSION_NAME:-}" || -z "${WORKSPACE_ROOT:-}" ]]; then
-  echo "ERROR: EXTENSION_NAME and WORKSPACE_ROOT must be set (run via: python dev/extension-service/run.py <ext> build)" >&2
+  echo "ERROR: EXTENSION_NAME and WORKSPACE_ROOT must be set (run via: python run.py <ext> build)" >&2
   exit 1
 fi
 

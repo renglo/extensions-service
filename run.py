@@ -2,12 +2,12 @@
 """
 Single entry point for extension installer/service actions.
 Usage:
-  python dev/extension-service/run.py <extension> <action> [action_args...]
-  python dev/extension-service/run.py noma build
-  python dev/extension-service/run.py exhq deploy --clean
-  python dev/extension-service/run.py noma run-local my_handler
-  python dev/extension-service/run.py noma view-logs --follow
-  python dev/extension-service/run.py noma test my_handler
+  python run.py <extension> <action> [action_args...]
+  python run.py noma build
+  python run.py exhq deploy --clean
+  python run.py noma run-local my_handler
+  python run.py noma view-logs --follow
+  python run.py noma test my_handler
 """ 
 import json
 import os
@@ -16,7 +16,6 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from provision_infra import cmd_apply as provision_apply, cmd_destroy as provision_destroy
 from lib import (
     get_script_dir,
     get_workspace_root,
@@ -26,11 +25,12 @@ from lib import (
     get_extra_extensions,
     list_extensions,
     validate_extension,
+    validate_extension_name,
     validate_iam_policy_file,
 )
 from deploy_flow import cmd_build as deploy_build, cmd_publish as deploy_publish, cmd_push as deploy_push
 from deploy_input import resolve_deploy_input_file
-from runtime_config import cmd_export_lambda_env, cmd_set_profile, ensure_runtime_profile_file
+from runtime_config import ensure_runtime_profile_file
 
 
 def _parse_profile_and_filter_args(args: list[str]) -> tuple[str | None, list[str]]:
@@ -65,6 +65,15 @@ def _run_script(script_name: str, env: dict | None = None, extra_args: list[str]
     cwd = get_workspace_root()
     cmd = [str(script), *(extra_args or [])]
     return subprocess.run(cmd, env=run_env, cwd=cwd).returncode
+
+
+def _run_domain_main(domain_dir: str, extension: str, action: str, rest: list[str]) -> int:
+    main_py = Path(__file__).resolve().parent / domain_dir / "main.py"
+    if not main_py.is_file():
+        print(f"ERROR: Domain entrypoint not found: {main_py}", file=sys.stderr)
+        return 1
+    cmd = [sys.executable, str(main_py), extension, action, *rest]
+    return subprocess.run(cmd, cwd=get_workspace_root(), env=os.environ.copy()).returncode
 
 
 def cmd_list(_args: list[str]) -> int:
@@ -161,7 +170,7 @@ def cmd_setup_iam(extension: str, args: list[str]) -> int:
 
 def cmd_provision_ecs_capacity(extension: str, args: list[str]) -> int:
     """Provision EC2 capacity for ECS (ASG + capacity provider)."""
-    validate_extension(extension)
+    validate_extension_name(extension)
     profile, _ = _parse_profile_and_filter_args(args)
     ensure_runtime_profile_file(extension, get_workspace_root())
     env = {
@@ -175,7 +184,7 @@ def cmd_provision_ecs_capacity(extension: str, args: list[str]) -> int:
 
 def cmd_undeploy_ecs_capacity(extension: str, args: list[str]) -> int:
     """Undeploy EC2 capacity for ECS (full cleanup)."""
-    validate_extension(extension)
+    validate_extension_name(extension)
     profile, _ = _parse_profile_and_filter_args(args)
     env = {
         "EXTENSION_NAME": extension,
@@ -220,22 +229,22 @@ def cmd_view_logs(extension: str, args: list[str]) -> int:
 
 def cmd_ecs_profile(extension: str, args: list[str]) -> int:
     """Compatibility wrapper: runtime set-profile."""
-    validate_extension(extension)
+    validate_extension_name(extension)
     _profile_aws, rest = _parse_profile_and_filter_args(args)
-    return cmd_set_profile(extension, rest)
+    return _run_domain_main("runtime-config", extension, "set-profile", rest)
 
 
 def cmd_provision_infra(extension: str, args: list[str]) -> int:
-    validate_extension(extension)
+    validate_extension_name(extension)
     if not args:
         print("Usage: run.py <ext> provision-infra apply|destroy [args...]", file=sys.stderr)
         return 1
     action = args[0].lower()
     rest = args[1:]
     if action == "apply":
-        return provision_apply(extension, rest)
+        return _run_domain_main("provision-infra", extension, "apply", rest)
     if action == "destroy":
-        return provision_destroy(extension, rest)
+        return _run_domain_main("provision-infra", extension, "destroy", rest)
     print(f"Unknown provision-infra action: {action}", file=sys.stderr)
     return 1
 
@@ -248,26 +257,26 @@ def cmd_deploy_flow(extension: str, args: list[str]) -> int:
     action = args[0].lower()
     rest = args[1:]
     if action == "build":
-        return deploy_build(extension, rest)
+        return _run_domain_main("deploy", extension, "build", rest)
     if action == "push":
-        return deploy_push(extension, rest)
+        return _run_domain_main("deploy", extension, "push", rest)
     if action == "publish":
-        return deploy_publish(extension, rest)
+        return _run_domain_main("deploy", extension, "publish", rest)
     print(f"Unknown deploy action: {action}", file=sys.stderr)
     return 1
 
 
 def cmd_runtime(extension: str, args: list[str]) -> int:
-    validate_extension(extension)
+    validate_extension_name(extension)
     if not args:
         print("Usage: run.py <ext> runtime set-profile|export-lambda-env [args...]", file=sys.stderr)
         return 1
     action = args[0].lower()
     rest = args[1:]
     if action == "set-profile":
-        return cmd_set_profile(extension, rest)
+        return _run_domain_main("runtime-config", extension, "set-profile", rest)
     if action == "export-lambda-env":
-        return cmd_export_lambda_env(extension, rest)
+        return _run_domain_main("runtime-config", extension, "export-lambda-env", rest)
     print(f"Unknown runtime action: {action}", file=sys.stderr)
     return 1
 

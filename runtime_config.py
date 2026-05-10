@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from lib import get_workspace_root, validate_extension
+from lib import get_workspace_root, validate_extension_name
 from state_store import (
     STATE_VERSION,
     default_runtime_profile,
@@ -45,7 +45,7 @@ def ensure_runtime_profile_file(extension: str, workspace_root: Path | None = No
 
 def cmd_set_profile(extension: str, args: list[str]) -> int:
     root = get_workspace_root()
-    validate_extension(extension, root)
+    validate_extension_name(extension)
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--small", action="store_true")
     parser.add_argument("--medium", action="store_true")
@@ -89,7 +89,7 @@ def cmd_set_profile(extension: str, args: list[str]) -> int:
 
 def cmd_export_lambda_env(extension: str, _args: list[str]) -> int:
     root = get_workspace_root()
-    validate_extension(extension, root)
+    validate_extension_name(extension)
     paths = get_state_paths(extension)
     provision = read_json(paths.provision_manifest) or {}
     profile = read_json(paths.runtime_profile) or default_runtime_profile()

@@ -49,6 +49,22 @@ def validate_extension(extension: str, workspace_root: Path | None = None) -> Pa
     return pkg
 
 
+def validate_extension_name(extension: str) -> str:
+    """
+    Validate extension identifier format for infra/state-only commands.
+    Does not require extensions/<name>/package.
+    """
+    name = (extension or "").strip()
+    if not name:
+        raise ValueError("Extension name must not be empty")
+    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_")
+    if any(ch not in allowed for ch in name):
+        raise ValueError(
+            f"Invalid extension name {extension!r}. Allowed characters: letters, numbers, '-' and '_'."
+        )
+    return name
+
+
 def get_function_name(extension: str, workspace_root: Path | None = None) -> str:
     """Read Lambda function name from deploy_input.lambda_config."""
     # Local import avoids circular dependency at module load time.

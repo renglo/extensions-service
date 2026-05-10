@@ -113,7 +113,7 @@ with open('$TEMP_CONFIG', 'w') as f:
 if [[ "$ACTION" == "deploy" ]]; then
   if ! aws iam get-role --role-name "$ROLE_FROM_CONFIG" >/dev/null 2>&1; then
     echo "ERROR: IAM role '$ROLE_FROM_CONFIG' does not exist or Lambda cannot assume it." >&2
-    echo "       Run this first: python3 dev/extensions-service/run.py $EXTENSION_NAME setup-iam" >&2
+    echo "       Run this first: python3 run.py $EXTENSION_NAME setup-iam" >&2
     rm -f "$TEMP_CONFIG"
     exit 1
   fi

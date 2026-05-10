@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from deploy_input import load_environment_variables_from_deploy_input
-from lib import get_workspace_root, get_script_dir, validate_extension, validate_iam_policy_file
+from lib import get_workspace_root, get_script_dir, validate_extension_name, validate_iam_policy_file
 from runtime_config import ensure_runtime_profile_file
 from state_store import STATE_VERSION, get_state_paths, read_json, utc_now_iso, write_json
 
@@ -67,7 +67,7 @@ def update_provision_manifest(extension: str, workspace_root: Path | None = None
 
 def cmd_apply(extension: str, args: list[str]) -> int:
     root = get_workspace_root()
-    validate_extension(extension, root)
+    validate_extension_name(extension)
     validate_iam_policy_file(extension, root)
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--profile")
@@ -92,7 +92,7 @@ def cmd_apply(extension: str, args: list[str]) -> int:
 
 def cmd_destroy(extension: str, args: list[str]) -> int:
     root = get_workspace_root()
-    validate_extension(extension, root)
+    validate_extension_name(extension)
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--profile")
     parsed, _ = parser.parse_known_args(args)
