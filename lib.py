@@ -1,13 +1,13 @@
 """
 Path and config helpers for extension service.
 Extensions are identified by extensions/<name>/package (handler code).
-Deploy configuration lives in dev/extensions-service/state/<name>/deploy_input.json.
+Deploy configuration lives in this package under state/<name>/deploy_input.json.
 """
 from pathlib import Path
 
 
 def get_workspace_root() -> Path:
-    """Workspace root (repo root). Assumes this file lives in dev/extension-service/."""
+    """Repo/workspace root (parent of top-level dirs like extensions/, dev/). Three levels above lib.py in .../extensions-service/."""
     return Path(__file__).resolve().parent.parent.parent
 
 
@@ -69,12 +69,13 @@ def get_function_name(extension: str, workspace_root: Path | None = None) -> str
     """Read Lambda function name from deploy_input.lambda_config."""
     # Local import avoids circular dependency at module load time.
     from deploy_input import load_lambda_config_from_deploy_input
+    from state_store import get_state_paths
 
     lc = load_lambda_config_from_deploy_input(extension, workspace_root)
     if not lc:
+        paths = get_state_paths(extension, workspace_root)
         raise FileNotFoundError(
-            f"No deploy_input for {extension}: set DEPLOY_INPUT_FILE or create "
-            f"dev/extensions-service/state/{extension}/deploy_input.json"
+            f"No deploy_input for {extension}: set DEPLOY_INPUT_FILE or create {paths.deploy_input}"
         )
     return lc.get("FunctionName", f"{extension}-handlers")
 

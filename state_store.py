@@ -12,6 +12,15 @@ from lib import get_workspace_root
 STATE_VERSION = 1
 
 
+def get_extensions_service_root() -> Path:
+    """
+    Directory of this package (the folder containing state_store.py), e.g. .../extensions-service/.
+    State files live under <this>/state/<extension>/ regardless of whether the package sits under
+    dev/, infra-installer/, or elsewhere in the repo tree.
+    """
+    return Path(__file__).resolve().parent
+
+
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
@@ -30,7 +39,7 @@ class ExtensionStatePaths:
 
 def get_state_paths(extension: str, workspace_root: Path | None = None) -> ExtensionStatePaths:
     root = workspace_root or get_workspace_root()
-    state_dir = root / "dev" / "extensions-service" / "state" / extension
+    state_dir = get_extensions_service_root() / "state" / extension
     return ExtensionStatePaths(
         root=root,
         extension=extension,
