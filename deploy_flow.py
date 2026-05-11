@@ -25,31 +25,76 @@ def _load_release_manifest(extension: str):
     return paths, data
 
 
-def cmd_build(extension: str, args: list[str]) -> int:
-    root = get_workspace_root()
-    validate_extension(extension, root)
+def _build_single(extension: str, root, large: bool, local: bool) -> int:
+    """Run one build pass and update the release manifest. Returns the script exit code."""
     env = {
         "EXTENSION_NAME": extension,
         "WORKSPACE_ROOT": str(root),
-        "EXTENSION_SERVICE_NATIVE_PLATFORM": "1" if "--local" in args else "0",
-        "EXTENSION_SERVICE_LARGE_BUILD": "1" if "--large" in args else "0",
+        "EXTENSION_SERVICE_NATIVE_PLATFORM": "1" if local else "0",
+        "EXTENSION_SERVICE_LARGE_BUILD": "1" if large else "0",
     }
     rc = _run_script("build_lambda_package.sh", env=env)
     if rc != 0:
         return rc
     paths, manifest = _load_release_manifest(extension)
-    mode = "ecs-large" if env["EXTENSION_SERVICE_LARGE_BUILD"] == "1" else "lambda"
-    image = f"{extension}-ecs-builder:{'local' if env['EXTENSION_SERVICE_NATIVE_PLATFORM'] == '1' and mode == 'ecs-large' else 'latest'}" if mode == "ecs-large" else f"{extension}-lambda-builder:{'local' if env['EXTENSION_SERVICE_NATIVE_PLATFORM'] == '1' else 'latest'}"
+    mode = "ecs-large" if large else "lambda"
+    if mode == "ecs-large":
+        image = f"{extension}-ecs-builder:{'local' if local else 'latest'}"
+    else:
+        image = f"{extension}-lambda-builder:{'local' if local else 'latest'}"
     manifest["state_version"] = STATE_VERSION
     manifest["updated_at"] = utc_now_iso()
-    manifest["last_build"] = {
-        "mode": mode,
+    manifest.setdefault("builds", {})
+    manifest["builds"][mode] = {
         "image": image,
-        "platform": "linux/arm64" if env["EXTENSION_SERVICE_NATIVE_PLATFORM"] == "1" else "linux/amd64",
+        "platform": "linux/arm64" if local else "linux/amd64",
         "created_at": utc_now_iso(),
     }
+    # Keep last_build pointing to the most recently completed build
+    manifest["last_build"] = {**manifest["builds"][mode], "mode": mode}
     write_json(paths.release_manifest, manifest)
-    print(f"Release manifest updated: {paths.release_manifest}")
+    print(f"Release manifest updated ({mode}): {paths.release_manifest}")
+    return 0
+
+
+def _ecs_is_provisioned(extension: str) -> bool:
+    """Return True if provision_manifest.json exists with an ECS cluster — meaning ECS infra is live."""
+    paths = get_state_paths(extension)
+    manifest = read_json(paths.provision_manifest)
+    return bool(manifest and manifest.get("ecs", {}).get("cluster"))
+
+
+def cmd_build(extension: str, args: list[str]) -> int:
+    """Build artifacts for the extension.
+
+    Lambda zip is always built first. ECS image is also built when:
+      - provision_manifest.json exists with an ECS cluster (auto-detected), OR
+      - --large is passed explicitly (useful before provision-infra has run).
+
+    Flags:
+      --large     Force ECS image build in addition to Lambda zip.
+      --local     Build Lambda as ARM64 (for run-local). ECS image is always amd64.
+      --no-ecs    Skip ECS image build even when provision_manifest says ECS is provisioned.
+    """
+    root = get_workspace_root()
+    validate_extension(extension, root)
+
+    force_large = "--large" in args
+    skip_ecs = "--no-ecs" in args
+    build_local = "--local" in args
+
+    # Lambda zip is always the first artifact
+    print("==> Building Lambda zip...")
+    rc = _build_single(extension, root, large=False, local=build_local)
+    if rc != 0:
+        return rc
+
+    # ECS image: explicit flag OR auto-detected from provision manifest
+    if not skip_ecs and (force_large or _ecs_is_provisioned(extension)):
+        source = "--large flag" if force_large else "provision_manifest.json"
+        print(f"==> Building ECS image (detected from {source})...")
+        return _build_single(extension, root, large=True, local=False)
+
     return 0
 
 

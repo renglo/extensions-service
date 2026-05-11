@@ -180,12 +180,33 @@ else
 fi
 
 echo "==> Ensure capacity provider..."
-if ! aws ecs describe-capacity-providers --capacity-providers "$ECS_CP_NAME" --region "$AWS_REGION" >/dev/null 2>&1; then
+ASG_ARN="$(aws autoscaling describe-auto-scaling-groups \
+  --auto-scaling-group-names "$ECS_ASG_NAME" \
+  --query 'AutoScalingGroups[0].AutoScalingGroupARN' \
+  --output text --region "$AWS_REGION")"
+if [[ -z "$ASG_ARN" || "$ASG_ARN" == "None" ]]; then
+  echo "ERROR: Could not find ASG ARN for $ECS_ASG_NAME" >&2
+  exit 1
+fi
+
+# describe-capacity-providers exits 0 even when CP does not exist (returns empty list).
+# Query the status field explicitly to detect existence.
+CP_STATUS="$(aws ecs describe-capacity-providers \
+  --capacity-providers "$ECS_CP_NAME" \
+  --region "$AWS_REGION" \
+  --query 'capacityProviders[0].status' \
+  --output text 2>/dev/null || true)"
+
+if [[ "$CP_STATUS" == "ACTIVE" ]]; then
+  echo "Capacity provider $ECS_CP_NAME already ACTIVE"
+else
   aws ecs create-capacity-provider \
     --name "$ECS_CP_NAME" \
-    --auto-scaling-group-provider "autoScalingGroupArn=$(aws autoscaling describe-auto-scaling-groups --auto-scaling-group-names "$ECS_ASG_NAME" --query 'AutoScalingGroups[0].AutoScalingGroupARN' --output text --region "$AWS_REGION"),managedScaling={status=ENABLED,targetCapacity=100,minimumScalingStepSize=1,maximumScalingStepSize=4},managedTerminationProtection=DISABLED" \
+    --auto-scaling-group-provider "autoScalingGroupArn=${ASG_ARN},managedScaling={status=ENABLED,targetCapacity=100,minimumScalingStepSize=1,maximumScalingStepSize=4},managedTerminationProtection=DISABLED" \
     --region "$AWS_REGION" >/dev/null
   echo "Created capacity provider $ECS_CP_NAME"
+  # Wait briefly for eventual consistency before associating
+  sleep 3
 fi
 
 echo "==> Associate capacity provider to cluster..."

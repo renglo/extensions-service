@@ -237,14 +237,12 @@ def cmd_ecs_profile(extension: str, args: list[str]) -> int:
 def cmd_provision_infra(extension: str, args: list[str]) -> int:
     validate_extension_name(extension)
     if not args:
-        print("Usage: run.py <ext> provision-infra apply|destroy [args...]", file=sys.stderr)
+        print("Usage: run.py <ext> provision-infra apply|destroy|export [args...]", file=sys.stderr)
         return 1
     action = args[0].lower()
     rest = args[1:]
-    if action == "apply":
-        return _run_domain_main("provision-infra", extension, "apply", rest)
-    if action == "destroy":
-        return _run_domain_main("provision-infra", extension, "destroy", rest)
+    if action in ("apply", "destroy", "export"):
+        return _run_domain_main("provision-infra", extension, action, rest)
     print(f"Unknown provision-infra action: {action}", file=sys.stderr)
     return 1
 
@@ -305,17 +303,35 @@ def main() -> int:
         print("       run.py list", file=sys.stderr)
         print("", file=sys.stderr)
         print("Actions: list, provision-infra, deploy, runtime, build, setup-iam, ecs-profile, provision-ecs-capacity, undeploy-ecs-capacity, run-local, view-logs, test", file=sys.stderr)
-        print("  build       Build package (Docker). --local = arm64 for run-local; --large = ECS image with [large-dependencies] extra; omit = Lambda zip.", file=sys.stderr)
-        print("  deploy      build|push|publish (new) OR deploy|update|undeploy (legacy lambda service).", file=sys.stderr)
-        print("  ecs-profile ECS sizing / Fargate vs EC2: --small|--medium|--large, --launch-type fargate|ec2, --network-mode ..., --force", file=sys.stderr)
-        print("  provision-ecs-capacity  Create/update ECS EC2 capacity (instance role/profile, launch template, ASG, capacity provider)", file=sys.stderr)
-        print("  undeploy-ecs-capacity   Full cleanup of ECS EC2 capacity (set ASG 0 and remove ASG/LT/capacity-provider/instance role)", file=sys.stderr)
-        print("  setup-iam   Create/update IAM policy and role for the Lambda (--profile NAME)", file=sys.stderr)
-        print("  run-local   Run a handler locally (Docker). Uses :local image if present (from build --local), else :latest. Args: <handler_name> [payload.json] [--rebuild]", file=sys.stderr)
-        print("  view-logs   Tail CloudWatch logs. Optional: --follow, --filter PATTERN, --hours N, --profile NAME", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("  provision-infra  Stage 1 (admin). Create AWS infra and write provision_manifest.json.", file=sys.stderr)
+        print("    apply    Create IAM roles, ECR, S3, ECS cluster. Subnets/SG auto-discovered from VPC.", file=sys.stderr)
+        print("             Options: --profile NAME, --launch-type fargate|ec2, --vpc vpc-xxxx,", file=sys.stderr)
+        print("             --region REGION, --with-capacity", file=sys.stderr)
+        print("    destroy  Tear down EC2 capacity (ASG/LT/CP). Options: --profile NAME", file=sys.stderr)
+        print("    export   Print env vars for launcher/vars.json; writes state/<ext>/lambda_env_export.json", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("  deploy           Stage 2. Build image and push to ECR (reads provision_manifest for resource names).", file=sys.stderr)
+        print("    build          Build artifacts. Lambda zip is always built.", file=sys.stderr)
+        print("                   ECS image is also built automatically if provision_manifest.json", file=sys.stderr)
+        print("                   shows ECS is provisioned. Flags: --large (force ECS build),", file=sys.stderr)
+        print("                   --no-ecs (skip ECS even if provisioned), --local (ARM64 Lambda).", file=sys.stderr)
+        print("    push           Push image to ECR and register task definition. --profile NAME", file=sys.stderr)
+        print("    publish        Record publish event in release_manifest.", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("  runtime          Stage 3. Adjust compute sizing without re-provisioning.", file=sys.stderr)
+        print("    set-profile    Set Fargate/EC2 sizing: --small|--medium|--large, --launch-type fargate|ec2,", file=sys.stderr)
+        print("                   --network-mode, --task-cpu, --task-memory, --ec2-instance-type, --asg-* flags", file=sys.stderr)
+        print("    export-lambda-env  Write state/<ext>/lambda_env_export.json (same as provision-infra export).", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("  build       Shortcut for 'deploy build'.", file=sys.stderr)
+        print("  setup-iam   Create/update Lambda IAM policy and role. --profile NAME", file=sys.stderr)
+        print("  ecs-profile Shortcut for 'runtime set-profile'.", file=sys.stderr)
+        print("  provision-ecs-capacity  Create/update EC2 ASG + capacity provider for ECS.", file=sys.stderr)
+        print("  undeploy-ecs-capacity   Remove EC2 ASG, launch template, and capacity provider.", file=sys.stderr)
+        print("  run-local   Run a handler locally via Docker. Args: <handler_name> [payload.json] [--rebuild]", file=sys.stderr)
+        print("  view-logs   Tail CloudWatch logs. Options: --follow, --filter PATTERN, --hours N, --profile NAME", file=sys.stderr)
         print("  test        Invoke handler on AWS Lambda. Args: <handler_name> [--payload-file file.json] [--profile NAME]", file=sys.stderr)
-        print("  provision-infra apply|destroy infrastructure baseline and refresh state manifest.", file=sys.stderr)
-        print("  runtime     set-profile|export-lambda-env into local state source of truth.", file=sys.stderr)
         return 1
 
     if sys.argv[1].lower() == "list":
@@ -344,7 +360,9 @@ def main() -> int:
     }
     if action not in handlers:
         print(f"Unknown action: {action}", file=sys.stderr)
-        print("Actions: list, provision-infra, deploy, runtime, build, setup-iam, ecs-profile, provision-ecs-capacity, undeploy-ecs-capacity, run-local, view-logs, test", file=sys.stderr)
+        print("Actions: list, provision-infra, deploy, runtime, build, setup-iam, ecs-profile,", file=sys.stderr)
+        print("         provision-ecs-capacity, undeploy-ecs-capacity, run-local, view-logs, test", file=sys.stderr)
+        print("Run without arguments for full help.", file=sys.stderr)
         return 1
 
     if action == "deploy":

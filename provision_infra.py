@@ -3,12 +3,12 @@ from __future__ import annotations
 import argparse
 import os
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 
-from deploy_input import load_environment_variables_from_deploy_input
-from lib import get_workspace_root, get_script_dir, validate_extension_name, validate_iam_policy_file
-from runtime_config import ensure_runtime_profile_file
+from lib import get_workspace_root, get_script_dir, validate_extension_name
+from runtime_config import cmd_export_lambda_env, cmd_set_profile, ensure_runtime_profile_file
 from state_store import STATE_VERSION, get_state_paths, read_json, utc_now_iso, write_json
 
 
@@ -22,43 +22,88 @@ def _run_script(script_name: str, env: dict[str, str], extra_args: list[str] | N
     return subprocess.run(cmd, cwd=get_workspace_root(), env=run_env).returncode
 
 
-def _read_lambda_env_vars(extension: str, workspace_root: Path) -> dict[str, Any]:
-    """ECS-related env from deploy_input.lambda_config (ECR/cluster/bucket names for manifest)."""
-    return load_environment_variables_from_deploy_input(extension, workspace_root)
-
-
 def _split_csv(value: str | None) -> list[str]:
     if not value:
         return []
     return [v.strip() for v in value.split(",") if v.strip()]
 
 
-def update_provision_manifest(extension: str, workspace_root: Path | None = None) -> Path:
+def update_provision_manifest(
+    extension: str,
+    workspace_root: Path | None = None,
+    infra_output: dict[str, Any] | None = None,
+    launch_type: str | None = None,
+    subnets: list[str] | None = None,
+    security_groups: list[str] | None = None,
+) -> Path:
+    """Write state/<ext>/provision_manifest.json from provisioned resource values.
+
+    Resource names are derived deterministically from the extension name.
+    Values from infra_output (written by provision_ecs_infra.sh) take priority
+    over previous manifest values, which in turn take priority over defaults.
+    Explicit subnets/security_groups/launch_type params always win.
+    """
     root = workspace_root or get_workspace_root()
-    vars_env = _read_lambda_env_vars(extension, root)
+    infra = infra_output or {}
     paths = get_state_paths(extension, root)
     previous = read_json(paths.provision_manifest) or {}
-    region = os.environ.get("AWS_REGION", previous.get("aws_region", "us-east-1"))
-    ecr_repo = f"{extension}-handlers-ecs"
+
+    region = (
+        infra.get("aws_region")
+        or os.environ.get("AWS_REGION")
+        or previous.get("aws_region", "us-east-1")
+    )
+
+    ecr_repo = infra.get("ecr_repo") or f"{extension}-handlers-ecs"
+    ecr_base_uri = infra.get("ecr_base_uri") or previous.get("ecr", {}).get("repository", ecr_repo)
+    # Keep existing image_uri tag if already set (deploy updates it on push)
+    ecr_image_uri = previous.get("ecr", {}).get("image_uri") or f"{ecr_base_uri}:latest"
+
+    ecs_bucket = (
+        infra.get("ecs_bucket")
+        or previous.get("buckets", {}).get("ecs_results_bucket")
+        or f"{extension}-handlers-ecs-results"
+    )
+    ecs_cluster = (
+        infra.get("ecs_cluster")
+        or previous.get("ecs", {}).get("cluster")
+        or f"{extension}-handlers"
+    )
+    task_definition = previous.get("ecs", {}).get("task_definition") or f"{extension}-handlers-ecs"
+
+    effective_launch_type = launch_type or previous.get("ecs", {}).get("launch_type", "fargate")
+    default_network_mode = "bridge" if effective_launch_type == "ec2" else "awsvpc"
+    network_mode = previous.get("ecs", {}).get("network_mode", default_network_mode)
+
+    # Prefer explicit params (for direct calls), then infra_output, then previous manifest
+    resolved_subnets = (
+        subnets if subnets is not None
+        else infra.get("subnets") or previous.get("ecs", {}).get("subnets", [])
+    )
+    resolved_sgs = (
+        security_groups if security_groups is not None
+        else infra.get("security_groups") or previous.get("ecs", {}).get("security_groups", [])
+    )
+
     provision = {
         "state_version": STATE_VERSION,
         "extension": extension,
         "updated_at": utc_now_iso(),
         "aws_region": region,
         "ecr": {
-            "repository": previous.get("ecr", {}).get("repository", ecr_repo),
-            "image_uri": previous.get("ecr", {}).get("image_uri", f"{ecr_repo}:latest"),
+            "repository": ecr_repo,
+            "image_uri": ecr_image_uri,
         },
         "ecs": {
-            "cluster": vars_env.get("ECS_CLUSTER", previous.get("ecs", {}).get("cluster", f"{extension}-handlers")),
-            "task_definition": vars_env.get("ECS_TASK_DEFINITION", previous.get("ecs", {}).get("task_definition", f"{extension}-handlers-ecs")),
-            "launch_type": previous.get("ecs", {}).get("launch_type", "fargate"),
-            "network_mode": previous.get("ecs", {}).get("network_mode", "awsvpc"),
-            "subnets": _split_csv(vars_env.get("ECS_SUBNETS")) or previous.get("ecs", {}).get("subnets", []),
-            "security_groups": _split_csv(vars_env.get("ECS_SECURITY_GROUPS")) or previous.get("ecs", {}).get("security_groups", []),
+            "cluster": ecs_cluster,
+            "task_definition": task_definition,
+            "launch_type": effective_launch_type,
+            "network_mode": network_mode,
+            "subnets": resolved_subnets,
+            "security_groups": resolved_sgs,
         },
         "buckets": {
-            "ecs_results_bucket": vars_env.get("ECS_RESULTS_BUCKET", previous.get("buckets", {}).get("ecs_results_bucket", f"{extension}-handlers-ecs-results"))
+            "ecs_results_bucket": ecs_bucket,
         },
     }
     write_json(paths.provision_manifest, provision)
@@ -66,27 +111,82 @@ def update_provision_manifest(extension: str, workspace_root: Path | None = None
 
 
 def cmd_apply(extension: str, args: list[str]) -> int:
+    """Create all AWS infrastructure for the extension and write provision_manifest.json.
+
+    Steps:
+      1. Lambda IAM role + policy (setup_iam_role.sh)
+      2. ECR repo, S3 bucket, ECS cluster, task/execution roles (provision_ecs_infra.sh)
+      3. EC2 ASG + capacity provider if --launch-type ec2 (provision_ecs_capacity.sh)
+      4. Write provision_manifest.json
+      5. Ensure runtime_profile.json exists
+    """
     root = get_workspace_root()
     validate_extension_name(extension)
-    validate_iam_policy_file(extension, root)
+
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--profile")
-    parser.add_argument("--with-capacity", action="store_true")
+    parser.add_argument("--launch-type", choices=["fargate", "ec2"], default=None)
+    parser.add_argument("--vpc", default=None,
+                        help="VPC ID to discover subnets/SG from. Uses account default VPC if omitted.")
+    parser.add_argument("--region", default=None)
+    parser.add_argument("--with-capacity", action="store_true",
+                        help="Also provision EC2 capacity (ASG/launch template). Implied by --launch-type ec2.")
     parsed, _ = parser.parse_known_args(args)
-    env = {"EXTENSION_NAME": extension, "WORKSPACE_ROOT": str(root)}
+
+    env: dict[str, str] = {"EXTENSION_NAME": extension, "WORKSPACE_ROOT": str(root)}
     if parsed.profile:
         env["AWS_PROFILE"] = parsed.profile
+    if parsed.region:
+        env["AWS_REGION"] = parsed.region
+    if parsed.vpc:
+        env["ECS_VPC_ID"] = parsed.vpc
 
+    # Step 1: Lambda IAM role
     rc = _run_script("setup_iam_role.sh", env)
     if rc != 0:
         return rc
-    if parsed.with_capacity:
+
+    # Step 2: ECS base infra (ECR, S3, cluster, IAM roles)
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w") as tf:
+        output_file = tf.name
+
+    infra_env = {**env, "PROVISION_OUTPUT_FILE": output_file}
+    rc = _run_script("provision_ecs_infra.sh", infra_env)
+    if rc != 0:
+        return rc
+
+    infra_output: dict[str, Any] = read_json(Path(output_file)) or {}
+    try:
+        os.unlink(output_file)
+    except OSError:
+        pass
+
+    # Step 3: EC2 capacity (if requested via flag or --launch-type ec2)
+    launch_type = parsed.launch_type or "fargate"
+    needs_capacity = parsed.with_capacity or launch_type == "ec2"
+    if needs_capacity:
+        # Update runtime_profile so provision_ecs_capacity.sh reads ec2 as the launch type
+        ensure_runtime_profile_file(extension, root)
+        cmd_set_profile(extension, [f"--launch-type={launch_type}"])
         rc = _run_script("provision_ecs_capacity.sh", env)
         if rc != 0:
             return rc
-    manifest_path = update_provision_manifest(extension, root)
+
+    # Step 4: Write provision manifest
+    # Subnets and security_groups come from infra_output (discovered by provision_ecs_infra.sh from VPC)
+    manifest_path = update_provision_manifest(
+        extension,
+        root,
+        infra_output=infra_output,
+        launch_type=launch_type,
+    )
+
+    # Step 5: Ensure runtime profile exists
     ensure_runtime_profile_file(extension, root)
+
     print(f"Provision manifest updated: {manifest_path}")
+    print(f"Run: python run.py {extension} provision-infra export")
+    print(f"  → prints env vars for launcher/vars.json and writes state/{extension}/lambda_env_export.json")
     return 0
 
 
@@ -96,7 +196,7 @@ def cmd_destroy(extension: str, args: list[str]) -> int:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--profile")
     parsed, _ = parser.parse_known_args(args)
-    env = {"EXTENSION_NAME": extension, "WORKSPACE_ROOT": str(root)}
+    env: dict[str, str] = {"EXTENSION_NAME": extension, "WORKSPACE_ROOT": str(root)}
     if parsed.profile:
         env["AWS_PROFILE"] = parsed.profile
     rc = _run_script("undeploy_ecs_capacity.sh", env)
@@ -106,3 +206,26 @@ def cmd_destroy(extension: str, args: list[str]) -> int:
     print(f"Provision manifest refreshed after destroy: {manifest_path}")
     return 0
 
+
+def cmd_export(extension: str, args: list[str]) -> int:
+    """Export provision manifest values as env vars for injection into launcher/vars.json.
+
+    Writes state/<ext>/lambda_env_export.json and prints the environment block to stdout.
+    """
+    validate_extension_name(extension)
+    rc = cmd_export_lambda_env(extension, args)
+    if rc != 0:
+        return rc
+
+    paths = get_state_paths(extension)
+    lambda_env = read_json(paths.lambda_env_export)
+    if lambda_env:
+        env_block = lambda_env.get("environment") or {}
+        print()
+        print("Values for launcher/vars.json (VARS section):")
+        print("-" * 48)
+        for key, value in env_block.items():
+            print(f'    "{key}": "{value}",')
+        print("-" * 48)
+        print(f"Full export: {paths.lambda_env_export}")
+    return 0
