@@ -241,7 +241,7 @@ def cmd_provision_infra(extension: str, args: list[str]) -> int:
         return 1
     action = args[0].lower()
     rest = args[1:]
-    if action in ("apply", "destroy", "export"):
+    if action in ("apply", "destroy", "export", "teardown"):
         return _run_domain_main("provision-infra", extension, action, rest)
     print(f"Unknown provision-infra action: {action}", file=sys.stderr)
     return 1
@@ -308,8 +308,9 @@ def main() -> int:
         print("    apply    Create IAM roles, ECR, S3, ECS cluster. Subnets/SG auto-discovered from VPC.", file=sys.stderr)
         print("             Options: --profile NAME, --launch-type fargate|ec2, --vpc vpc-xxxx,", file=sys.stderr)
         print("             --region REGION, --with-capacity", file=sys.stderr)
-        print("    destroy  Tear down EC2 capacity (ASG/LT/CP). Options: --profile NAME", file=sys.stderr)
-        print("    export   Print env vars for launcher/vars.json; writes state/<ext>/lambda_env_export.json", file=sys.stderr)
+        print("    destroy   Tear down EC2 capacity only (ASG/LT/CP). Options: --profile NAME", file=sys.stderr)
+        print("    export    Print env vars for launcher/vars.json; writes state/<ext>/lambda_env_export.json", file=sys.stderr)
+        print("    teardown  DESTRUCTIVE: Delete ALL AWS resources. Requires --yes. Options: --profile NAME", file=sys.stderr)
         print("", file=sys.stderr)
         print("  deploy           Stage 2. Build image and push to ECR (reads provision_manifest for resource names).", file=sys.stderr)
         print("    build          Build artifacts. Lambda zip is always built.", file=sys.stderr)

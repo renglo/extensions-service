@@ -207,6 +207,53 @@ def cmd_destroy(extension: str, args: list[str]) -> int:
     return 0
 
 
+def cmd_teardown(extension: str, args: list[str]) -> int:
+    """DESTRUCTIVE: Remove ALL AWS resources created by provision-infra apply.
+
+    Deletes (in order): EC2 capacity, ECS task definitions, ECS cluster, ECR repo,
+    S3 bucket, ECS IAM roles, Lambda IAM role and managed policy.
+
+    Requires --yes to confirm (prevents accidental runs).
+    """
+    validate_extension_name(extension)
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--profile")
+    parser.add_argument("--region", default=None)
+    parser.add_argument("--yes", action="store_true", help="Confirm destructive teardown")
+    parsed, _ = parser.parse_known_args(args)
+
+    if not parsed.yes:
+        print("ERROR: teardown is destructive and irreversible.", file=__import__("sys").stderr)
+        print("Pass --yes to confirm you want to delete all AWS resources for this extension.", file=__import__("sys").stderr)
+        return 1
+
+    root = get_workspace_root()
+    paths = get_state_paths(extension, root)
+    manifest = read_json(paths.provision_manifest) or {}
+
+    env: dict[str, str] = {"EXTENSION_NAME": extension, "WORKSPACE_ROOT": str(root)}
+    if parsed.profile:
+        env["AWS_PROFILE"] = parsed.profile
+    # Pass manifest values so script uses exact names if available
+    if manifest.get("aws_region") or parsed.region:
+        env["AWS_REGION"] = parsed.region or manifest["aws_region"]
+    if manifest.get("ecs", {}).get("cluster"):
+        env["ECS_CLUSTER"] = manifest["ecs"]["cluster"]
+    if manifest.get("buckets", {}).get("ecs_results_bucket"):
+        env["ECS_RESULTS_BUCKET"] = manifest["buckets"]["ecs_results_bucket"]
+
+    rc = _run_script("teardown_all.sh", env)
+    if rc != 0:
+        return rc
+
+    # Clear local state files after successful teardown
+    import shutil
+    if paths.state_dir.is_dir():
+        shutil.rmtree(paths.state_dir)
+        print(f"Removed local state: {paths.state_dir}")
+    return 0
+
+
 def cmd_export(extension: str, args: list[str]) -> int:
     """Export provision manifest values as env vars for injection into launcher/vars.json.
 

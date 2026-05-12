@@ -50,9 +50,14 @@ python3 dev/extensions-service/run.py <extension> provision-infra export
 #          ECS_RESULTS_BUCKET, ECS_LAUNCH_TYPE, ECS_NETWORK_MODE
 # → writes state/<ext>/lambda_env_export.json
 
-# Tear down EC2 capacity (cluster is kept, IAM roles kept)
+# Tear down EC2 capacity only (cluster is kept, IAM roles kept)
 python3 dev/extensions-service/run.py <extension> provision-infra destroy \
   --profile my-admin-profile
+
+# DESTRUCTIVE: delete ALL AWS resources (IAM, ECR, S3, ECS cluster, roles, policy)
+# Also removes local state/<ext>/ directory
+python3 dev/extensions-service/run.py <extension> provision-infra teardown \
+  --profile my-admin-profile --yes
 ```
 
 ---

@@ -99,3 +99,15 @@ def default_release_manifest(extension: str) -> dict[str, Any]:
         "last_publish": None,
     }
 
+
+def read_provision_manifest(extension: str, workspace_root: Path | None = None) -> dict[str, Any] | None:
+    """Return parsed provision_manifest.json for extension, or None if not present."""
+    paths = get_state_paths(extension, workspace_root)
+    return read_json(paths.provision_manifest)
+
+
+def read_runtime_profile(extension: str, workspace_root: Path | None = None) -> dict[str, Any] | None:
+    """Return parsed runtime_profile.json for extension, or None if not present."""
+    paths = get_state_paths(extension, workspace_root)
+    return read_json(paths.runtime_profile)
+
