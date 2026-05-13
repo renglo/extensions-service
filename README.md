@@ -8,7 +8,7 @@ Short deploy-flow diagram: [DEPLOY_FLOW.md](DEPLOY_FLOW.md).
 
 | Stage | Command | Permissions | Output |
 |-------|---------|-------------|--------|
-| **1 — provision-infra** | `provision-infra apply` | Admin (IAM, ECR, ECS, S3) | `provision_manifest.json` |
+| **1 — provision-infra** | `provision-infra apply` | Admin (IAM, ECR, ECS, S3) | `provision_manifest.json`, optional `handlers_github_oidc.json` |
 | **2 — deploy** | `deploy build / push / publish` | DevOps (ECR push, ECS task def) | `release_manifest.json` |
 | **3 — runtime-config** | `runtime set-profile / export-lambda-env` | Moderate (ASG update) | `runtime_profile.json`, `lambda_env_export.json` |
 
@@ -26,6 +26,7 @@ Creates all AWS infrastructure and writes the manifest that stages 2 and 3 consu
 - ECS task execution role + task role (IAM)
 - Subnets and security group — auto-discovered from the VPC (default VPC unless `--vpc` is passed)
 - EC2 ASG + launch template + capacity provider (only when `--launch-type ec2`)
+- **Optional:** GitHub OIDC IAM roles for the handlers repo (`--github-repo Org/repo`), using templates under `utils/github-handlers-*.template.json`. Writes `state/<ext>/handlers_github_oidc.json`. `provision-infra teardown` removes these roles/policies before deleting ECS resources.
 
 **Requires:** `extensions/<name>/installer/service/<name>-handlers-iam-policy.json`
 
@@ -43,6 +44,13 @@ python3 dev/extensions-service/run.py <extension> provision-infra apply \
 python3 dev/extensions-service/run.py <extension> provision-infra apply \
   --profile my-admin-profile \
   --vpc vpc-0abc1234
+
+# Same as above, plus GitHub OIDC roles for CI (trusts repo:ORG/handlers-repo:environment:production)
+python3 dev/extensions-service/run.py <extension> provision-infra apply \
+  --profile my-admin-profile \
+  --launch-type ec2 \
+  --github-repo ORG/handlers-repo \
+  [--enable-handlers-staging-role]
 
 # Export values for launcher/vars.json
 python3 dev/extensions-service/run.py <extension> provision-infra export
@@ -154,6 +162,7 @@ All under `dev/extensions-service/state/<extension>/` — gitignored except `sta
 | File | Written by | Contents |
 |------|-----------|----------|
 | `provision_manifest.json` | `provision-infra apply` | ECR URI, S3 bucket, ECS cluster, subnets, SGs |
+| `handlers_github_oidc.json` | `provision-infra apply` (with `--github-repo`) | Handlers repo OIDC role ARNs, policy names, GitHub repo string |
 | `runtime_profile.json` | `provision-infra apply`, `runtime set-profile` | launch_type, network_mode, CPU/memory, ASG sizing |
 | `release_manifest.json` | `deploy build/push/publish` | last build, last push, last publish timestamps |
 | `lambda_env_export.json` | `provision-infra export`, `runtime export-lambda-env` | Env vars ready for `launcher/vars.json` |

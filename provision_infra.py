@@ -119,9 +119,11 @@ def cmd_apply(extension: str, args: list[str]) -> int:
       3. EC2 ASG + capacity provider if --launch-type ec2 (provision_ecs_capacity.sh)
       4. Write provision_manifest.json
       5. Ensure runtime_profile.json exists
+      6. Optional: GitHub OIDC IAM roles for the handlers repo (--github-repo)
     """
     root = get_workspace_root()
     validate_extension_name(extension)
+    paths = get_state_paths(extension, root)
 
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--profile")
@@ -131,6 +133,16 @@ def cmd_apply(extension: str, args: list[str]) -> int:
     parser.add_argument("--region", default=None)
     parser.add_argument("--with-capacity", action="store_true",
                         help="Also provision EC2 capacity (ASG/launch template). Implied by --launch-type ec2.")
+    parser.add_argument(
+        "--github-repo",
+        default=None,
+        help="GitHub org/repo for handlers workflows (OIDC trust). When set, creates/updates IAM roles after apply.",
+    )
+    parser.add_argument(
+        "--enable-handlers-staging-role",
+        action="store_true",
+        help="Create a second OIDC role for GitHub Environment 'staging' (same permissions as production).",
+    )
     parsed, _ = parser.parse_known_args(args)
 
     env: dict[str, str] = {"EXTENSION_NAME": extension, "WORKSPACE_ROOT": str(root)}
@@ -183,6 +195,32 @@ def cmd_apply(extension: str, args: list[str]) -> int:
 
     # Step 5: Ensure runtime profile exists
     ensure_runtime_profile_file(extension, root)
+
+    github_repo = (parsed.github_repo or "").strip()
+    if github_repo:
+        from bootstrap_handlers_github_oidc import HandlersBootstrapConfig, run as bootstrap_handlers_oidc
+
+        manifest_now = read_json(paths.provision_manifest) or {}
+        region_oidc = (
+            parsed.region
+            or manifest_now.get("aws_region")
+            or env.get("AWS_REGION")
+            or "us-east-1"
+        )
+        ecs_bucket = (manifest_now.get("buckets") or {}).get("ecs_results_bucket")
+        bootstrap_handlers_oidc(
+            HandlersBootstrapConfig(
+                extension=extension,
+                aws_profile=parsed.profile,
+                aws_region=region_oidc,
+                github_repo=github_repo,
+                enable_staging_role=parsed.enable_handlers_staging_role,
+                ecs_results_bucket=ecs_bucket,
+                apply_changes=True,
+                state_out_path=paths.handlers_github_oidc,
+            )
+        )
+        print(f"Handlers GitHub OIDC state written: {paths.handlers_github_oidc}")
 
     print(f"Provision manifest updated: {manifest_path}")
     print(f"Run: python run.py {extension} provision-infra export")
@@ -241,6 +279,12 @@ def cmd_teardown(extension: str, args: list[str]) -> int:
         env["ECS_CLUSTER"] = manifest["ecs"]["cluster"]
     if manifest.get("buckets", {}).get("ecs_results_bucket"):
         env["ECS_RESULTS_BUCKET"] = manifest["buckets"]["ecs_results_bucket"]
+
+    from bootstrap_handlers_github_oidc import teardown_handlers_github_oidc
+
+    region_oidc = parsed.region or manifest.get("aws_region") or env.get("AWS_REGION") or "us-east-1"
+    teardown_handlers_github_oidc(extension, parsed.profile, region_oidc, apply_changes=True)
+    print("Removed handlers GitHub OIDC IAM roles/policies (if present).")
 
     rc = _run_script("teardown_all.sh", env)
     if rc != 0:

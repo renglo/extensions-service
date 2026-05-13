@@ -2,6 +2,8 @@
 set -euo pipefail
 
 # DESTRUCTIVE: Remove ALL AWS resources created by provision-infra apply for one extension.
+# Handlers GitHub OIDC IAM roles/policies are removed first by provision_infra.cmd_teardown (Python),
+# then this script continues with:
 # Resources removed (in dependency order):
 #   EC2 capacity (ASG, launch template, capacity provider, instance role/profile)
 #   ECS task definitions (all revisions deregistered)

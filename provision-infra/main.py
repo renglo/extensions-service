@@ -18,7 +18,9 @@ actions:
   apply     Create all AWS infra (IAM roles, ECR, S3, ECS cluster) and write provision_manifest.json.
             Subnets and security groups are auto-discovered from the VPC (default VPC unless --vpc is set).
             Options: --profile NAME, --launch-type fargate|ec2, --vpc vpc-xxxx,
-                     --region REGION, --with-capacity
+                     --region REGION, --with-capacity,
+                     --github-repo ORG/REPO (handlers OIDC; writes state/<ext>/handlers_github_oidc.json),
+                     --enable-handlers-staging-role (second OIDC role for GitHub environment staging)
   destroy   Tear down EC2 capacity only (ASG/launch template/capacity provider). Cluster kept.
             Options: --profile NAME
   export    Print manifest values as KEY=VALUE for launcher/vars.json and write lambda_env_export.json.
