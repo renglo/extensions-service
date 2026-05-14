@@ -12,9 +12,12 @@ set -euo pipefail
 #   S3 results bucket (all objects, then bucket)
 #   IAM ECS roles (task + execution)
 #   IAM Lambda role + managed policy
+#   CloudWatch log groups (ECS + optional Lambda), unless TEARDOWN_KEEP_LOGS=1
 #
 # Requires: EXTENSION_NAME, WORKSPACE_ROOT
 # Optional: AWS_REGION, AWS_PROFILE, ECS_CLUSTER, ECS_RESULTS_BUCKET
+#           TEARDOWN_KEEP_LOGS=1 — skip deleting CloudWatch log groups
+#           LAMBDA_LOG_GROUP_NAME — e.g. /aws/lambda/my-fn (deleted when logs not kept)
 
 if [[ -z "${EXTENSION_NAME:-}" || -z "${WORKSPACE_ROOT:-}" ]]; then
   echo "ERROR: EXTENSION_NAME and WORKSPACE_ROOT must be set" >&2
@@ -49,15 +52,20 @@ echo "  ECR repo:       $ECR_REPO"
 echo "  S3 bucket:      $ECS_BUCKET"
 echo "  IAM roles:      $LAMBDA_ROLE_NAME, $EXECUTION_ROLE_NAME, $TASK_ROLE_NAME"
 echo "  IAM policy:     $POLICY_NAME"
+if [[ "${TEARDOWN_KEEP_LOGS:-}" == "1" || "${TEARDOWN_KEEP_LOGS:-}" == "true" ]]; then
+  echo "  CloudWatch:     KEPT (TEARDOWN_KEEP_LOGS / --keep-logs)"
+else
+  echo "  CloudWatch:     /ecs/$ECS_TASK_FAMILY${LAMBDA_LOG_GROUP_NAME:+ + $LAMBDA_LOG_GROUP_NAME}"
+fi
 echo ""
 
 # ── Step 1: EC2 capacity (reuse existing script) ──────────────────────────────
-echo "==> [1/7] EC2 capacity (ASG, launch template, capacity provider, instance role)..."
+echo "==> [1/8] EC2 capacity (ASG, launch template, capacity provider, instance role)..."
 "$SCRIPT_DIR/undeploy_ecs_capacity.sh" || true
 echo ""
 
 # ── Step 2: ECS task definitions ─────────────────────────────────────────────
-echo "==> [2/7] ECS task definitions..."
+echo "==> [2/8] ECS task definitions..."
 TASK_DEF_ARNS=$(aws ecs list-task-definitions \
   --family-prefix "$ECS_TASK_FAMILY" \
   --region "$AWS_REGION" \
@@ -74,7 +82,7 @@ fi
 
 # ── Step 3: ECS cluster ───────────────────────────────────────────────────────
 echo ""
-echo "==> [3/7] ECS cluster..."
+echo "==> [3/8] ECS cluster..."
 CLUSTER_STATUS=$(aws ecs describe-clusters --clusters "$ECS_CLUSTER" --region "$AWS_REGION" \
   --query 'clusters[0].status' --output text 2>/dev/null || true)
 if [[ "$CLUSTER_STATUS" == "ACTIVE" ]]; then
@@ -86,9 +94,8 @@ fi
 
 # ── Step 4: ECR repository ────────────────────────────────────────────────────
 echo ""
-echo "==> [4/7] ECR repository..."
+echo "==> [4/8] ECR repository..."
 if aws ecr describe-repositories --repository-names "$ECR_REPO" --region "$AWS_REGION" >/dev/null 2>&1; then
-  # Delete all images first (required before deleting repo)
   IMAGE_IDS=$(aws ecr list-images --repository-name "$ECR_REPO" --region "$AWS_REGION" \
     --query 'imageIds[]' --output json 2>/dev/null || echo "[]")
   if [[ "$IMAGE_IDS" != "[]" && -n "$IMAGE_IDS" ]]; then
@@ -104,11 +111,9 @@ fi
 
 # ── Step 5: S3 bucket ─────────────────────────────────────────────────────────
 echo ""
-echo "==> [5/7] S3 bucket..."
+echo "==> [5/8] S3 bucket..."
 if aws s3api head-bucket --bucket "$ECS_BUCKET" 2>/dev/null; then
-  # Remove all objects (handles versioned and non-versioned)
   aws s3 rm "s3://$ECS_BUCKET" --recursive --region "$AWS_REGION" 2>/dev/null || true
-  # Remove any versioned objects / delete markers
   python3 - <<PY
 import boto3, os
 s3 = boto3.client("s3", region_name=os.environ.get("AWS_REGION", "us-east-1"))
@@ -131,9 +136,8 @@ fi
 
 # ── Step 6: IAM ECS roles ─────────────────────────────────────────────────────
 echo ""
-echo "==> [6/7] IAM ECS roles..."
+echo "==> [6/8] IAM ECS roles..."
 
-# Execution role
 if aws iam get-role --role-name "$EXECUTION_ROLE_NAME" >/dev/null 2>&1; then
   aws iam detach-role-policy --role-name "$EXECUTION_ROLE_NAME" \
     --policy-arn "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy" >/dev/null 2>&1 || true
@@ -143,7 +147,6 @@ else
   echo "  Role $EXECUTION_ROLE_NAME not found."
 fi
 
-# Task role
 if aws iam get-role --role-name "$TASK_ROLE_NAME" >/dev/null 2>&1; then
   aws iam delete-role-policy --role-name "$TASK_ROLE_NAME" \
     --policy-name "ecs-handlers-s3-ecr" >/dev/null 2>&1 || true
@@ -157,11 +160,9 @@ fi
 
 # ── Step 7: Lambda role + managed policy ─────────────────────────────────────
 echo ""
-echo "==> [7/7] Lambda role and managed policy..."
+echo "==> [7/8] Lambda role and managed policy..."
 
-# Lambda role
 if aws iam get-role --role-name "$LAMBDA_ROLE_NAME" >/dev/null 2>&1; then
-  # Detach all attached managed policies
   ATTACHED=$(aws iam list-attached-role-policies --role-name "$LAMBDA_ROLE_NAME" \
     --query 'AttachedPolicies[*].PolicyArn' --output text 2>/dev/null || true)
   for parn in $ATTACHED; do
@@ -173,7 +174,6 @@ else
   echo "  Role $LAMBDA_ROLE_NAME not found."
 fi
 
-# Managed policy (must delete all non-default versions first)
 if aws iam get-policy --policy-arn "$POLICY_ARN" >/dev/null 2>&1; then
   VERSIONS=$(aws iam list-policy-versions --policy-arn "$POLICY_ARN" \
     --query 'Versions[?IsDefaultVersion==`false`].VersionId' --output text 2>/dev/null || true)
@@ -186,7 +186,32 @@ else
   echo "  Policy $POLICY_NAME not found."
 fi
 
+# ── Step 8: CloudWatch Logs (optional retention via TEARDOWN_KEEP_LOGS) ───────
+echo ""
+echo "==> [8/8] CloudWatch Logs..."
+ECS_LOG_GROUP="/ecs/${ECS_TASK_FAMILY}"
+if [[ "${TEARDOWN_KEEP_LOGS:-}" == "1" || "${TEARDOWN_KEEP_LOGS:-}" == "true" ]]; then
+  echo "  Skipped (TEARDOWN_KEEP_LOGS). Preserved: $ECS_LOG_GROUP"
+  [[ -n "${LAMBDA_LOG_GROUP_NAME:-}" ]] && echo "  Preserved: $LAMBDA_LOG_GROUP_NAME"
+else
+  if aws logs describe-log-groups --log-group-name-prefix "$ECS_LOG_GROUP" --region "$AWS_REGION" \
+    --query "logGroups[?logGroupName=='$ECS_LOG_GROUP'].logGroupName" --output text 2>/dev/null | grep -q .; then
+    aws logs delete-log-group --log-group-name "$ECS_LOG_GROUP" --region "$AWS_REGION" >/dev/null 2>&1 || true
+    echo "  Deleted log group $ECS_LOG_GROUP"
+  else
+    echo "  Log group $ECS_LOG_GROUP not found."
+  fi
+  if [[ -n "${LAMBDA_LOG_GROUP_NAME:-}" ]]; then
+    if aws logs describe-log-groups --log-group-name-prefix "$LAMBDA_LOG_GROUP_NAME" --region "$AWS_REGION" \
+      --query "logGroups[?logGroupName=='$LAMBDA_LOG_GROUP_NAME'].logGroupName" --output text 2>/dev/null | grep -q .; then
+      aws logs delete-log-group --log-group-name "$LAMBDA_LOG_GROUP_NAME" --region "$AWS_REGION" >/dev/null 2>&1 || true
+      echo "  Deleted log group $LAMBDA_LOG_GROUP_NAME"
+    else
+      echo "  Log group $LAMBDA_LOG_GROUP_NAME not found."
+    fi
+  fi
+fi
+
 echo ""
 echo "Teardown complete for $EXTENSION_NAME."
-echo "Local state files are preserved in state/$EXTENSION_NAME/ — delete them manually if needed."
 echo ""

@@ -7,6 +7,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from deploy_input import load_lambda_config_from_deploy_input
 from lib import get_workspace_root, get_script_dir, validate_extension_name
 from runtime_config import cmd_export_lambda_env, cmd_set_profile, ensure_runtime_profile_file
 from state_store import STATE_VERSION, get_state_paths, read_json, utc_now_iso, write_json
@@ -249,7 +250,8 @@ def cmd_teardown(extension: str, args: list[str]) -> int:
     """DESTRUCTIVE: Remove ALL AWS resources created by provision-infra apply.
 
     Deletes (in order): EC2 capacity, ECS task definitions, ECS cluster, ECR repo,
-    S3 bucket, ECS IAM roles, Lambda IAM role and managed policy.
+    S3 bucket, ECS IAM roles, Lambda IAM role and managed policy, CloudWatch log groups
+    (unless --keep-logs).
 
     Requires --yes to confirm (prevents accidental runs).
     """
@@ -258,6 +260,11 @@ def cmd_teardown(extension: str, args: list[str]) -> int:
     parser.add_argument("--profile")
     parser.add_argument("--region", default=None)
     parser.add_argument("--yes", action="store_true", help="Confirm destructive teardown")
+    parser.add_argument(
+        "--keep-logs",
+        action="store_true",
+        help="Do not delete CloudWatch log groups (/ecs/... and Lambda if known from deploy_input)",
+    )
     parsed, _ = parser.parse_known_args(args)
 
     if not parsed.yes:
@@ -279,6 +286,13 @@ def cmd_teardown(extension: str, args: list[str]) -> int:
         env["ECS_CLUSTER"] = manifest["ecs"]["cluster"]
     if manifest.get("buckets", {}).get("ecs_results_bucket"):
         env["ECS_RESULTS_BUCKET"] = manifest["buckets"]["ecs_results_bucket"]
+    if parsed.keep_logs:
+        env["TEARDOWN_KEEP_LOGS"] = "1"
+
+    # Lambda log group name (before state dir is removed) — optional second CW group to delete
+    lc = load_lambda_config_from_deploy_input(extension, root)
+    if lc and lc.get("FunctionName"):
+        env["LAMBDA_LOG_GROUP_NAME"] = f"/aws/lambda/{lc['FunctionName']}"
 
     from bootstrap_handlers_github_oidc import teardown_handlers_github_oidc
 

@@ -27,8 +27,9 @@ Creates all AWS infrastructure and writes the manifest that stages 2 and 3 consu
 - Subnets and security group — auto-discovered from the VPC (default VPC unless `--vpc` is passed)
 - EC2 ASG + launch template + capacity provider (only when `--launch-type ec2`)
 - **Optional:** GitHub OIDC IAM roles for the handlers repo (`--github-repo Org/repo`), using templates under `utils/github-handlers-*.template.json`. Writes `state/<ext>/handlers_github_oidc.json`. `provision-infra teardown` removes these roles/policies before deleting ECS resources.
+- **Teardown:** `provision-infra teardown --yes` deletes all provisioned AWS resources. By default it also deletes CloudWatch log groups `/ecs/<ext>-handlers-ecs` and, if `state/<ext>/deploy_input.json` defines `lambda_config.FunctionName`, `/aws/lambda/<FunctionName>`. Pass **`--keep-logs`** to retain those log groups (e.g. for audits).
 
-**Requires:** `extensions/<name>/installer/service/<name>-handlers-iam-policy.json`
+**IAM policy file:** Optional. If `extensions/<name>/installer/service/<name>-handlers-iam-policy.json` exists it is used for the Lambda handlers policy; otherwise a minimal policy is generated from the extension name and account (ECS invoke + S3 handshake).
 
 ```bash
 # Fargate (default) — uses default VPC
@@ -62,10 +63,16 @@ python3 dev/extensions-service/run.py <extension> provision-infra export
 python3 dev/extensions-service/run.py <extension> provision-infra destroy \
   --profile my-admin-profile
 
-# DESTRUCTIVE: delete ALL AWS resources (IAM, ECR, S3, ECS cluster, roles, policy)
-# Also removes local state/<ext>/ directory
+# DESTRUCTIVE: delete ALL AWS resources (IAM, ECR, S3, ECS cluster, roles, policy).
+# By default also deletes CloudWatch log groups: /ecs/<ext>-handlers-ecs and, if
+# state/<ext>/deploy_input.json has lambda_config.FunctionName, /aws/lambda/<FunctionName>.
+# Also removes local state/<ext>/ directory.
 python3 dev/extensions-service/run.py <extension> provision-infra teardown \
   --profile my-admin-profile --yes
+
+# Keep CloudWatch logs for audit / debugging
+python3 dev/extensions-service/run.py <extension> provision-infra teardown \
+  --profile my-admin-profile --yes --keep-logs
 ```
 
 ---
@@ -173,7 +180,7 @@ All under `dev/extensions-service/state/<extension>/` — gitignored except `sta
 ## Per-extension repo layout
 
 - **`extensions/<name>/package/`** — handler code and `pyproject.toml` (required for build/run-local/list).
-- **`extensions/<name>/installer/service/<name>-handlers-iam-policy.json`** — IAM policy JSON required by `provision-infra apply` and `setup-iam`.
+- **`extensions/<name>/installer/service/<name>-handlers-iam-policy.json`** — optional override for the Lambda handlers IAM policy; if missing, `provision-infra apply` / `setup-iam` generate a minimal policy from resource names.
 - **`extensions/<name>/package/handlers_config.json`** — handler routing for `lambda_router.py`.
 - **`dev/extensions-service/state/<name>/`** — generated locally (gitignored except `schemas/`).
 

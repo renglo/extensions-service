@@ -24,9 +24,9 @@ actions:
   destroy   Tear down EC2 capacity only (ASG/launch template/capacity provider). Cluster kept.
             Options: --profile NAME
   export    Print manifest values as KEY=VALUE for launcher/vars.json and write lambda_env_export.json.
-  teardown  DESTRUCTIVE: Delete ALL AWS resources (IAM, ECR, S3, ECS, roles, policy).
+  teardown  DESTRUCTIVE: Delete ALL AWS resources (IAM, ECR, S3, ECS, roles, policy, CloudWatch logs).
             Requires --yes to confirm. Also removes local state/<ext>/ directory.
-            Options: --profile NAME, --region REGION, --yes
+            Options: --profile NAME, --region REGION, --yes, --keep-logs (preserve CloudWatch log groups)
 """,
     )
     parser.add_argument("extension")
