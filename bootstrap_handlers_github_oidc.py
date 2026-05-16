@@ -251,13 +251,10 @@ def teardown_handlers_github_oidc(
                 raise
 
         try:
+            # Non-default versions only; IAM rejects DeletePolicyVersion on the default version.
             versions = iam.list_policy_versions(PolicyArn=policy_arn).get("Versions", [])
             for ver in versions:
                 if not ver.get("IsDefaultVersion"):
-                    iam.delete_policy_version(PolicyArn=policy_arn, VersionId=ver["VersionId"])
-            versions = iam.list_policy_versions(PolicyArn=policy_arn).get("Versions", [])
-            for ver in versions:
-                if ver.get("IsDefaultVersion"):
                     iam.delete_policy_version(PolicyArn=policy_arn, VersionId=ver["VersionId"])
             iam.delete_policy(PolicyArn=policy_arn)
         except ClientError as exc:

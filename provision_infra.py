@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import os
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -276,7 +277,11 @@ def cmd_teardown(extension: str, args: list[str]) -> int:
     paths = get_state_paths(extension, root)
     manifest = read_json(paths.provision_manifest) or {}
 
-    env: dict[str, str] = {"EXTENSION_NAME": extension, "WORKSPACE_ROOT": str(root)}
+    env: dict[str, str] = {
+        "EXTENSION_NAME": extension,
+        "WORKSPACE_ROOT": str(root),
+        "TEARDOWN_PYTHON": sys.executable,
+    }
     if parsed.profile:
         env["AWS_PROFILE"] = parsed.profile
     # Pass manifest values so script uses exact names if available

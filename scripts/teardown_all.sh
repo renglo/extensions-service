@@ -18,6 +18,7 @@ set -euo pipefail
 # Optional: AWS_REGION, AWS_PROFILE, ECS_CLUSTER, ECS_RESULTS_BUCKET
 #           TEARDOWN_KEEP_LOGS=1 — skip deleting CloudWatch log groups
 #           LAMBDA_LOG_GROUP_NAME — e.g. /aws/lambda/my-fn (deleted when logs not kept)
+#           TEARDOWN_PYTHON — python with boto3 (auto-set by run.py provision-infra teardown)
 
 if [[ -z "${EXTENSION_NAME:-}" || -z "${WORKSPACE_ROOT:-}" ]]; then
   echo "ERROR: EXTENSION_NAME and WORKSPACE_ROOT must be set" >&2
@@ -40,6 +41,59 @@ TASK_ROLE_NAME="${EXTENSION_NAME}-handlers-ecs-task"
 LAMBDA_ROLE_NAME="${EXTENSION_NAME}-handlers-role"
 POLICY_NAME="$(echo "${EXTENSION_NAME:0:1}" | tr '[:lower:]' '[:upper:]')${EXTENSION_NAME:1}HandlersPolicy"
 POLICY_ARN="arn:aws:iam::${AWS_ACCOUNT}:policy/${POLICY_NAME}"
+
+# Inline S3 cleanup uses boto3. TEARDOWN_PYTHON is set by provision_infra.cmd_teardown (run.py venv).
+_resolve_teardown_python() {
+  if [[ -n "${TEARDOWN_PYTHON:-}" && -f "$TEARDOWN_PYTHON" ]]; then
+    printf '%s\n' "$TEARDOWN_PYTHON"
+    return
+  fi
+  local cand
+  for cand in "${WORKSPACE_ROOT}/extensions-service/venv/bin/python" \
+              "${WORKSPACE_ROOT}/extensions-service/venv/Scripts/python.exe"; do
+    if [[ -f "$cand" ]]; then
+      printf '%s\n' "$cand"
+      return
+    fi
+  done
+  printf '%s\n' python3
+}
+TEARDOWN_PY="$(_resolve_teardown_python)"
+
+# After EC2 capacity teardown, ECS may still report UpdateInProgress on cluster attachments.
+# Initial delay + exponential backoff (cap 120s) on DeleteCluster.
+_delete_ecs_cluster_with_retry() {
+  local cluster="$1" region="$2"
+  local max_attempts=12 attempt=1 wait_sec=15
+  local output
+
+  echo "  Waiting 30s for cluster capacity updates to settle before delete..."
+  sleep 30
+
+  while (( attempt <= max_attempts )); do
+    if output=$(aws ecs delete-cluster --cluster "$cluster" --region "$region" 2>&1); then
+      echo "  Deleted cluster $cluster"
+      return 0
+    fi
+    if [[ "$output" == *UpdateInProgressException* ]]; then
+      echo "  Cluster busy (UpdateInProgress); attempt $attempt/$max_attempts, sleeping ${wait_sec}s..."
+      sleep "$wait_sec"
+      wait_sec=$((wait_sec * 2))
+      (( wait_sec > 120 )) && wait_sec=120
+      attempt=$((attempt + 1))
+      continue
+    fi
+    if [[ "$output" == *ResourceNotFoundException* || "$output" == *ClusterNotFoundException* ]]; then
+      echo "  Cluster $cluster not found (already deleted)."
+      return 0
+    fi
+    echo "$output" >&2
+    return 1
+  done
+
+  echo "ERROR: delete-cluster still busy after $max_attempts attempts: $cluster" >&2
+  return 1
+}
 
 echo "=========================================="
 echo "TEARDOWN ALL: $EXTENSION_NAME"
@@ -86,8 +140,7 @@ echo "==> [3/8] ECS cluster..."
 CLUSTER_STATUS=$(aws ecs describe-clusters --clusters "$ECS_CLUSTER" --region "$AWS_REGION" \
   --query 'clusters[0].status' --output text 2>/dev/null || true)
 if [[ "$CLUSTER_STATUS" == "ACTIVE" ]]; then
-  aws ecs delete-cluster --cluster "$ECS_CLUSTER" --region "$AWS_REGION" >/dev/null
-  echo "  Deleted cluster $ECS_CLUSTER"
+  _delete_ecs_cluster_with_retry "$ECS_CLUSTER" "$AWS_REGION"
 else
   echo "  Cluster $ECS_CLUSTER not found or already deleted."
 fi
@@ -114,7 +167,7 @@ echo ""
 echo "==> [5/8] S3 bucket..."
 if aws s3api head-bucket --bucket "$ECS_BUCKET" 2>/dev/null; then
   aws s3 rm "s3://$ECS_BUCKET" --recursive --region "$AWS_REGION" 2>/dev/null || true
-  python3 - <<PY
+  "$TEARDOWN_PY" - <<PY
 import boto3, os
 s3 = boto3.client("s3", region_name=os.environ.get("AWS_REGION", "us-east-1"))
 bucket = "$ECS_BUCKET"
