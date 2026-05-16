@@ -37,8 +37,14 @@ def update_provision_manifest(
     launch_type: str | None = None,
     subnets: list[str] | None = None,
     security_groups: list[str] | None = None,
+    lambda_only: bool = False,
 ) -> Path:
     """Write state/<ext>/provision_manifest.json from provisioned resource values.
+
+    When lambda_only=True and the previous manifest has no ECS cluster, writes a
+    minimal manifest without ECS/ECR/buckets sections. If ECS was already provisioned
+    in a previous apply (manifest has ecs.cluster), those sections are always preserved —
+    lambda_only re-apply never downgrades an existing ECS setup.
 
     Resource names are derived deterministically from the extension name.
     Values from infra_output (written by provision_ecs_infra.sh) take priority
@@ -55,6 +61,19 @@ def update_provision_manifest(
         or os.environ.get("AWS_REGION")
         or previous.get("aws_region", "us-east-1")
     )
+
+    previous_has_ecs = bool(previous.get("ecs", {}).get("cluster"))
+
+    if lambda_only and not previous_has_ecs:
+        provision: dict[str, Any] = {
+            "state_version": STATE_VERSION,
+            "extension": extension,
+            "updated_at": utc_now_iso(),
+            "aws_region": region,
+            "lambda_only": True,
+        }
+        write_json(paths.provision_manifest, provision)
+        return paths.provision_manifest
 
     ecr_repo = infra.get("ecr_repo") or f"{extension}-handlers-ecs"
     ecr_base_uri = infra.get("ecr_base_uri") or previous.get("ecr", {}).get("repository", ecr_repo)
@@ -112,16 +131,59 @@ def update_provision_manifest(
     return paths.provision_manifest
 
 
-def cmd_apply(extension: str, args: list[str]) -> int:
-    """Create all AWS infrastructure for the extension and write provision_manifest.json.
+def _bootstrap_handlers_oidc_if_requested(
+    extension: str,
+    paths,
+    parsed,
+    env: dict[str, str],
+    root: Path,
+) -> None:
+    github_repo = (parsed.github_repo or "").strip()
+    if not github_repo:
+        return
+    from bootstrap_handlers_github_oidc import HandlersBootstrapConfig, run as bootstrap_handlers_oidc
 
-    Steps:
+    manifest_now = read_json(paths.provision_manifest) or {}
+    region_oidc = (
+        parsed.region
+        or manifest_now.get("aws_region")
+        or env.get("AWS_REGION")
+        or "us-east-1"
+    )
+    ecs_bucket = (manifest_now.get("buckets") or {}).get("ecs_results_bucket")
+    bootstrap_handlers_oidc(
+        HandlersBootstrapConfig(
+            extension=extension,
+            aws_profile=parsed.profile,
+            aws_region=region_oidc,
+            github_repo=github_repo,
+            enable_staging_role=parsed.enable_handlers_staging_role,
+            ecs_results_bucket=ecs_bucket,
+            apply_changes=True,
+            state_out_path=paths.handlers_github_oidc,
+        )
+    )
+    print(f"Handlers GitHub OIDC state written: {paths.handlers_github_oidc}")
+
+
+def cmd_apply(extension: str, args: list[str]) -> int:
+    """Create AWS infrastructure for the extension and write provision_manifest.json.
+
+    Without --launch-type (lambda-only mode):
+      1. Lambda IAM role + policy (setup_iam_role.sh)
+      2. Write minimal provision_manifest.json (lambda_only: true)
+         If ECS infra was already provisioned in a previous apply, those manifest
+         sections are preserved and this run only refreshes the Lambda IAM.
+
+    With --launch-type fargate|ec2 (Lambda + ECS mode):
       1. Lambda IAM role + policy (setup_iam_role.sh)
       2. ECR repo, S3 bucket, ECS cluster, task/execution roles (provision_ecs_infra.sh)
       3. EC2 ASG + capacity provider if --launch-type ec2 (provision_ecs_capacity.sh)
-      4. Write provision_manifest.json
+      4. Write full provision_manifest.json
       5. Ensure runtime_profile.json exists
-      6. Optional: GitHub OIDC IAM roles for the handlers repo (--github-repo)
+
+    Both modes (optional):
+      6. GitHub OIDC IAM roles for the handlers repo (--github-repo)
     """
     root = get_workspace_root()
     validate_extension_name(extension)
@@ -155,10 +217,26 @@ def cmd_apply(extension: str, args: list[str]) -> int:
     if parsed.vpc:
         env["ECS_VPC_ID"] = parsed.vpc
 
-    # Step 1: Lambda IAM role
+    lambda_only = parsed.launch_type is None
+
+    # Step 1: Lambda IAM role (always)
     rc = _run_script("setup_iam_role.sh", env)
     if rc != 0:
         return rc
+
+    if lambda_only:
+        previous = read_json(paths.provision_manifest) or {}
+        if previous.get("ecs", {}).get("cluster"):
+            print(
+                "[provision-infra] ECS infra already provisioned — Lambda IAM refreshed, "
+                "ECS manifest preserved."
+            )
+            print("  To add/update ECS: re-run with --launch-type fargate|ec2")
+        manifest_path = update_provision_manifest(extension, root, lambda_only=True)
+        print(f"Provision manifest updated: {manifest_path}")
+        print(f"Run: python run.py {extension} deploy build   # Lambda zip only (no ECS cluster in manifest)")
+        _bootstrap_handlers_oidc_if_requested(extension, paths, parsed, env, root)
+        return 0
 
     # Step 2: ECS base infra (ECR, S3, cluster, IAM roles)
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w") as tf:
@@ -176,7 +254,7 @@ def cmd_apply(extension: str, args: list[str]) -> int:
         pass
 
     # Step 3: EC2 capacity (if requested via flag or --launch-type ec2)
-    launch_type = parsed.launch_type or "fargate"
+    launch_type = parsed.launch_type  # fargate or ec2 (never None here)
     needs_capacity = parsed.with_capacity or launch_type == "ec2"
     if needs_capacity:
         # Update runtime_profile so provision_ecs_capacity.sh reads ec2 as the launch type
@@ -198,31 +276,7 @@ def cmd_apply(extension: str, args: list[str]) -> int:
     # Step 5: Ensure runtime profile exists
     ensure_runtime_profile_file(extension, root)
 
-    github_repo = (parsed.github_repo or "").strip()
-    if github_repo:
-        from bootstrap_handlers_github_oidc import HandlersBootstrapConfig, run as bootstrap_handlers_oidc
-
-        manifest_now = read_json(paths.provision_manifest) or {}
-        region_oidc = (
-            parsed.region
-            or manifest_now.get("aws_region")
-            or env.get("AWS_REGION")
-            or "us-east-1"
-        )
-        ecs_bucket = (manifest_now.get("buckets") or {}).get("ecs_results_bucket")
-        bootstrap_handlers_oidc(
-            HandlersBootstrapConfig(
-                extension=extension,
-                aws_profile=parsed.profile,
-                aws_region=region_oidc,
-                github_repo=github_repo,
-                enable_staging_role=parsed.enable_handlers_staging_role,
-                ecs_results_bucket=ecs_bucket,
-                apply_changes=True,
-                state_out_path=paths.handlers_github_oidc,
-            )
-        )
-        print(f"Handlers GitHub OIDC state written: {paths.handlers_github_oidc}")
+    _bootstrap_handlers_oidc_if_requested(extension, paths, parsed, env, root)
 
     print(f"Provision manifest updated: {manifest_path}")
     print(f"Run: python run.py {extension} provision-infra export")

@@ -16,27 +16,38 @@ Short deploy-flow diagram: [DEPLOY_FLOW.md](DEPLOY_FLOW.md).
 
 ## Stage 1 — provision-infra (admin, once per environment)
 
-Creates all AWS infrastructure and writes the manifest that stages 2 and 3 consume.
+Creates AWS infrastructure and writes the manifest that stages 2 and 3 consume.
 
-**What it creates:**
+**Lambda-only (default — omit `--launch-type`):**
 - Lambda IAM policy + role (`setup_iam_role.sh`)
+- Minimal `provision_manifest.json` with `lambda_only: true` (no ECS cluster in manifest → `deploy build` produces Lambda zip only)
+
+**Lambda + ECS (pass `--launch-type fargate` or `--launch-type ec2`):**
+- Everything above, plus:
 - ECR repository: `{ext}-handlers-ecs`
 - S3 results bucket: `{ext}-handlers-ecs-{account_id}`
 - ECS cluster: `{ext}-handlers`
 - ECS task execution role + task role (IAM)
 - Subnets and security group — auto-discovered from the VPC (default VPC unless `--vpc` is passed)
 - EC2 ASG + launch template + capacity provider (only when `--launch-type ec2`)
+
+Re-running **without** `--launch-type` on an environment that already has ECS in the manifest only refreshes Lambda IAM and **preserves** ECS sections (does not tear down ECS).
 - **Optional:** GitHub OIDC IAM roles for the handlers repo (`--github-repo Org/repo`), using templates under `utils/github-handlers-*.template.json`. Writes `state/<ext>/handlers_github_oidc.json`. `provision-infra teardown` removes these roles/policies before deleting ECS resources.
 - **Teardown:** `provision-infra teardown --yes` deletes all provisioned AWS resources. By default it also deletes CloudWatch log groups `/ecs/<ext>-handlers-ecs` and, if `state/<ext>/deploy_input.json` defines `lambda_config.FunctionName`, `/aws/lambda/<FunctionName>`. Pass **`--keep-logs`** to retain those log groups (e.g. for audits).
 
 **IAM policy file:** Optional. If `extensions/<name>/installer/service/<name>-handlers-iam-policy.json` exists it is used for the Lambda handlers policy; otherwise a minimal policy is generated from the extension name and account (ECS invoke + S3 handshake).
 
 ```bash
-# Fargate (default) — uses default VPC
+# Lambda-only (default) — no ECS cluster, ECR, or S3 results bucket
 python3 dev/extensions-service/run.py <extension> provision-infra apply \
   --profile my-admin-profile
 
-# EC2 — uses default VPC, also provisions ASG/capacity provider
+# Lambda + ECS on Fargate — uses default VPC
+python3 dev/extensions-service/run.py <extension> provision-infra apply \
+  --profile my-admin-profile \
+  --launch-type fargate
+
+# Lambda + ECS on EC2 — also provisions ASG/capacity provider
 python3 dev/extensions-service/run.py <extension> provision-infra apply \
   --profile my-admin-profile \
   --launch-type ec2

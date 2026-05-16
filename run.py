@@ -305,7 +305,7 @@ def main() -> int:
         print("Actions: list, provision-infra, deploy, runtime, build, setup-iam, ecs-profile, provision-ecs-capacity, undeploy-ecs-capacity, run-local, view-logs, test", file=sys.stderr)
         print("", file=sys.stderr)
         print("  provision-infra  Stage 1 (admin). Create AWS infra and write provision_manifest.json.", file=sys.stderr)
-        print("    apply    Create IAM roles, ECR, S3, ECS cluster. Subnets/SG auto-discovered from VPC.", file=sys.stderr)
+        print("    apply    Default (no --launch-type): Lambda IAM only. With --launch-type: also ECR/S3/ECS.", file=sys.stderr)
         print("             Options: --profile NAME, --launch-type fargate|ec2, --vpc vpc-xxxx,", file=sys.stderr)
         print("             --region REGION, --with-capacity", file=sys.stderr)
         print("    destroy   Tear down EC2 capacity only (ASG/LT/CP). Options: --profile NAME", file=sys.stderr)

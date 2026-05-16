@@ -15,8 +15,9 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 actions:
-  apply     Create all AWS infra (IAM roles, ECR, S3, ECS cluster) and write provision_manifest.json.
-            Subnets and security groups are auto-discovered from the VPC (default VPC unless --vpc is set).
+  apply     Create AWS infra and write provision_manifest.json.
+            Without --launch-type: Lambda IAM only (minimal manifest; deploy build = Lambda zip only).
+            With --launch-type fargate|ec2: also ECR, S3, ECS cluster (subnets/SG from VPC).
             Options: --profile NAME, --launch-type fargate|ec2, --vpc vpc-xxxx,
                      --region REGION, --with-capacity,
                      --github-repo ORG/REPO (handlers OIDC; writes state/<ext>/handlers_github_oidc.json),
