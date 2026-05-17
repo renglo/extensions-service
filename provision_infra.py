@@ -9,7 +9,12 @@ from pathlib import Path
 from typing import Any
 
 from deploy_input import load_lambda_config_from_deploy_input
-from lib import get_workspace_root, get_script_dir, validate_extension_name
+from lib import (
+    build_handlers_lambda_manifest_block,
+    get_workspace_root,
+    get_script_dir,
+    validate_extension_name,
+)
 from runtime_config import cmd_export_lambda_env, cmd_set_profile, ensure_runtime_profile_file
 from state_store import STATE_VERSION, get_state_paths, read_json, utc_now_iso, write_json
 
@@ -30,6 +35,31 @@ def _split_csv(value: str | None) -> list[str]:
     return [v.strip() for v in value.split(",") if v.strip()]
 
 
+def _resolve_aws_account_id(aws_profile: str | None, aws_region: str) -> str:
+    import boto3
+
+    session = (
+        boto3.Session(profile_name=aws_profile, region_name=aws_region)
+        if aws_profile
+        else boto3.Session(region_name=aws_region)
+    )
+    account_id = session.client("sts").get_caller_identity().get("Account")
+    if not account_id:
+        raise RuntimeError("Could not resolve AWS account ID from sts:GetCallerIdentity")
+    return str(account_id)
+
+
+def _attach_lambda_block(
+    provision: dict[str, Any],
+    handlers_lambda: dict[str, str] | None,
+    previous: dict[str, Any],
+) -> None:
+    if handlers_lambda:
+        provision["lambda"] = handlers_lambda
+    elif previous.get("lambda"):
+        provision["lambda"] = dict(previous["lambda"])
+
+
 def update_provision_manifest(
     extension: str,
     workspace_root: Path | None = None,
@@ -38,6 +68,7 @@ def update_provision_manifest(
     subnets: list[str] | None = None,
     security_groups: list[str] | None = None,
     lambda_only: bool = False,
+    handlers_lambda: dict[str, str] | None = None,
 ) -> Path:
     """Write state/<ext>/provision_manifest.json from provisioned resource values.
 
@@ -72,6 +103,7 @@ def update_provision_manifest(
             "aws_region": region,
             "lambda_only": True,
         }
+        _attach_lambda_block(provision, handlers_lambda, previous)
         write_json(paths.provision_manifest, provision)
         return paths.provision_manifest
 
@@ -127,6 +159,7 @@ def update_provision_manifest(
             "ecs_results_bucket": ecs_bucket,
         },
     }
+    _attach_lambda_block(provision, handlers_lambda, previous)
     write_json(paths.provision_manifest, provision)
     return paths.provision_manifest
 
@@ -218,6 +251,13 @@ def cmd_apply(extension: str, args: list[str]) -> int:
         env["ECS_VPC_ID"] = parsed.vpc
 
     lambda_only = parsed.launch_type is None
+    region_for_manifest = (
+        parsed.region or env.get("AWS_REGION") or "us-east-1"
+    )
+    account_id = _resolve_aws_account_id(parsed.profile, region_for_manifest)
+    handlers_lambda = build_handlers_lambda_manifest_block(
+        extension, region_for_manifest, account_id, root
+    )
 
     # Step 1: Lambda IAM role (always)
     rc = _run_script("setup_iam_role.sh", env)
@@ -232,10 +272,16 @@ def cmd_apply(extension: str, args: list[str]) -> int:
                 "ECS manifest preserved."
             )
             print("  To add/update ECS: re-run with --launch-type fargate|ec2")
-        manifest_path = update_provision_manifest(extension, root, lambda_only=True)
+        manifest_path = update_provision_manifest(
+            extension,
+            root,
+            lambda_only=True,
+            handlers_lambda=handlers_lambda,
+        )
         print(f"Provision manifest updated: {manifest_path}")
         print(f"Run: python run.py {extension} deploy build   # Lambda zip only (no ECS cluster in manifest)")
         _bootstrap_handlers_oidc_if_requested(extension, paths, parsed, env, root)
+        cmd_export_lambda_env(extension, [])
         return 0
 
     # Step 2: ECS base infra (ECR, S3, cluster, IAM roles)
@@ -266,11 +312,20 @@ def cmd_apply(extension: str, args: list[str]) -> int:
 
     # Step 4: Write provision manifest
     # Subnets and security_groups come from infra_output (discovered by provision_ecs_infra.sh from VPC)
+    region_for_manifest = str(
+        infra_output.get("aws_region") or region_for_manifest
+    )
+    account_id = str(infra_output.get("aws_account") or account_id)
+    handlers_lambda = build_handlers_lambda_manifest_block(
+        extension, region_for_manifest, account_id, root
+    )
+
     manifest_path = update_provision_manifest(
         extension,
         root,
         infra_output=infra_output,
         launch_type=launch_type,
+        handlers_lambda=handlers_lambda,
     )
 
     # Step 5: Ensure runtime profile exists
@@ -279,8 +334,8 @@ def cmd_apply(extension: str, args: list[str]) -> int:
     _bootstrap_handlers_oidc_if_requested(extension, paths, parsed, env, root)
 
     print(f"Provision manifest updated: {manifest_path}")
-    print(f"Run: python run.py {extension} provision-infra export")
-    print(f"  → prints env vars for launcher/vars.json and writes state/{extension}/lambda_env_export.json")
+    cmd_export_lambda_env(extension, [])
+    print(f"Run: python run.py {extension} deploy build")
     return 0
 
 

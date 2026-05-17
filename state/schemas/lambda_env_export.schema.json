@@ -17,7 +17,8 @@
         "ECS_SUBNETS": { "type": "string" },
         "ECS_SECURITY_GROUPS": { "type": "string" },
         "ECS_LAUNCH_TYPE": { "type": "string" },
-        "ECS_NETWORK_MODE": { "type": "string" }
+        "ECS_NETWORK_MODE": { "type": "string" },
+        "LAMBDA_EXTERNAL_HANDLERS_ARN": { "type": "string" }
       }
     }
   }

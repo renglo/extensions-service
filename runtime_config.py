@@ -95,20 +95,26 @@ def cmd_export_lambda_env(extension: str, _args: list[str]) -> int:
     profile = read_json(paths.runtime_profile) or default_runtime_profile()
     ecs = provision.get("ecs") or {}
     buckets = provision.get("buckets") or {}
+    handlers_lambda = provision.get("lambda") or {}
+
+    environment: dict[str, str] = {
+        "ECS_RESULTS_BUCKET": buckets.get("ecs_results_bucket", f"{extension}-handlers-ecs-results"),
+        "ECS_CLUSTER": ecs.get("cluster", f"{extension}-handlers"),
+        "ECS_TASK_DEFINITION": ecs.get("task_definition", f"{extension}-handlers-ecs"),
+        "ECS_SUBNETS": ",".join(ecs.get("subnets") or []),
+        "ECS_SECURITY_GROUPS": ",".join(ecs.get("security_groups") or []),
+        "ECS_LAUNCH_TYPE": profile.get("launch_type", "fargate"),
+        "ECS_NETWORK_MODE": profile.get("network_mode", "awsvpc"),
+    }
+    handlers_arn = handlers_lambda.get("LAMBDA_EXTERNAL_HANDLERS_ARN")
+    if handlers_arn:
+        environment["LAMBDA_EXTERNAL_HANDLERS_ARN"] = str(handlers_arn)
 
     payload = {
         "state_version": STATE_VERSION,
         "extension": extension,
         "updated_at": utc_now_iso(),
-        "environment": {
-            "ECS_RESULTS_BUCKET": buckets.get("ecs_results_bucket", f"{extension}-handlers-ecs-results"),
-            "ECS_CLUSTER": ecs.get("cluster", f"{extension}-handlers"),
-            "ECS_TASK_DEFINITION": ecs.get("task_definition", f"{extension}-handlers-ecs"),
-            "ECS_SUBNETS": ",".join(ecs.get("subnets") or []),
-            "ECS_SECURITY_GROUPS": ",".join(ecs.get("security_groups") or []),
-            "ECS_LAUNCH_TYPE": profile.get("launch_type", "fargate"),
-            "ECS_NETWORK_MODE": profile.get("network_mode", "awsvpc"),
-        },
+        "environment": environment,
     }
     write_json(paths.lambda_env_export, payload)
     print(f"Lambda env export written: {paths.lambda_env_export}")

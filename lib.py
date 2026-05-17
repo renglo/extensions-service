@@ -65,9 +65,38 @@ def validate_extension_name(extension: str) -> str:
     return name
 
 
+def resolve_handlers_function_name(extension: str, workspace_root: Path | None = None) -> str:
+    """Handlers Lambda name: deploy_input.lambda_config.FunctionName or {extension}-handlers."""
+    from deploy_input import load_lambda_config_from_deploy_input
+
+    lc = load_lambda_config_from_deploy_input(extension, workspace_root)
+    if lc and lc.get("FunctionName"):
+        return str(lc["FunctionName"])
+    return f"{extension}-handlers"
+
+
+def build_handlers_lambda_arn(function_name: str, region: str, account_id: str) -> str:
+    return f"arn:aws:lambda:{region}:{account_id}:function:{function_name}"
+
+
+def build_handlers_lambda_manifest_block(
+    extension: str,
+    region: str,
+    account_id: str,
+    workspace_root: Path | None = None,
+) -> dict[str, str]:
+    """Manifest fragment for external handlers Lambda (name + ARN env key)."""
+    function_name = resolve_handlers_function_name(extension, workspace_root)
+    return {
+        "function_name": function_name,
+        "LAMBDA_EXTERNAL_HANDLERS_ARN": build_handlers_lambda_arn(
+            function_name, region, account_id
+        ),
+    }
+
+
 def get_function_name(extension: str, workspace_root: Path | None = None) -> str:
-    """Read Lambda function name from deploy_input.lambda_config."""
-    # Local import avoids circular dependency at module load time.
+    """Read Lambda function name from deploy_input.lambda_config (raises if deploy_input missing)."""
     from deploy_input import load_lambda_config_from_deploy_input
     from state_store import get_state_paths
 
@@ -77,7 +106,7 @@ def get_function_name(extension: str, workspace_root: Path | None = None) -> str
         raise FileNotFoundError(
             f"No deploy_input for {extension}: set DEPLOY_INPUT_FILE or create {paths.deploy_input}"
         )
-    return lc.get("FunctionName", f"{extension}-handlers")
+    return lc.get("FunctionName", resolve_handlers_function_name(extension, workspace_root))
 
 
 def get_handlers_iam_policy_path(extension: str, workspace_root: Path | None = None) -> Path:

@@ -20,7 +20,7 @@ Creates AWS infrastructure and writes the manifest that stages 2 and 3 consume.
 
 **Lambda-only (default — omit `--launch-type`):**
 - Lambda IAM policy + role (`setup_iam_role.sh`)
-- Minimal `provision_manifest.json` with `lambda_only: true` (no ECS cluster in manifest → `deploy build` produces Lambda zip only)
+- Minimal `provision_manifest.json` with `lambda_only: true` and `lambda.LAMBDA_EXTERNAL_HANDLERS_ARN` (handlers function ARN for launcher/backend; no ECS cluster → `deploy build` produces Lambda zip only)
 
 **Lambda + ECS (pass `--launch-type fargate` or `--launch-type ec2`):**
 - Everything above, plus:
@@ -179,7 +179,7 @@ All under `dev/extensions-service/state/<extension>/` — gitignored except `sta
 
 | File | Written by | Contents |
 |------|-----------|----------|
-| `provision_manifest.json` | `provision-infra apply` | ECR URI, S3 bucket, ECS cluster, subnets, SGs |
+| `provision_manifest.json` | `provision-infra apply` | `lambda.LAMBDA_EXTERNAL_HANDLERS_ARN`, ECR URI, S3 bucket, ECS cluster, subnets, SGs |
 | `handlers_github_oidc.json` | `provision-infra apply` (with `--github-repo`) | Handlers repo OIDC role ARNs, policy names, GitHub repo string |
 | `runtime_profile.json` | `provision-infra apply`, `runtime set-profile` | launch_type, network_mode, CPU/memory, ASG sizing |
 | `release_manifest.json` | `deploy build/push/publish` | last build, last push, last publish timestamps |
