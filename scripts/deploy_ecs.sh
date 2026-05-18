@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# shellcheck source=_common.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_common.sh"
 
 # Deploy extension handlers to ECS (Fargate and/or EC2 per extensions/<name>/installer/ecs_profile.json).
 # Requires: EXTENSION_NAME, WORKSPACE_ROOT. Image must exist (run build --large first).

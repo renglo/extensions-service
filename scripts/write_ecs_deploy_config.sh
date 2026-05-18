@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# shellcheck source=_common.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_common.sh"
 
 # Writes ecs_deploy_config.json for an extension: s3_bucket, cluster, task_definition,
 # subnets and security_groups (auto-filled from default VPC when possible).

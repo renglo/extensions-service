@@ -9,7 +9,7 @@ from deploy_input import (
     get_runtime_env_from_deploy_input,
     resolve_deploy_input_file,
 )
-from lib import get_workspace_root, get_script_dir, validate_extension
+from lib import get_workspace_root, get_script_dir, merge_script_env, validate_extension
 from state_store import STATE_VERSION, default_release_manifest, get_state_paths, read_json, utc_now_iso, write_json
 
 
@@ -18,7 +18,7 @@ def _run_script(script_name: str, env: dict[str, str], extra_args: list[str] | N
     if not script.is_file():
         print(f"ERROR: Script not found: {script}")
         return 1
-    run_env = {**os.environ, **env}
+    run_env = merge_script_env(env)
     cmd = [str(script), *(extra_args or [])]
     return subprocess.run(cmd, cwd=get_workspace_root(), env=run_env).returncode
 

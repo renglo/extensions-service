@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# shellcheck source=_common.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_common.sh"
 
 # Provision base ECS infrastructure for an extension (admin-level permissions required):
 #   - S3 results bucket + lifecycle policy

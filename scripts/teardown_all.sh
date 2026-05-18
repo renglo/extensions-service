@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# shellcheck source=_common.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_common.sh"
 
 # DESTRUCTIVE: Remove ALL AWS resources created by provision-infra apply for one extension.
 # Handlers GitHub OIDC IAM roles/policies are removed first by provision_infra.cmd_teardown (Python),

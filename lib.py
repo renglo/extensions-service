@@ -3,7 +3,17 @@ Path and config helpers for extension service.
 Extensions are identified by extensions/<name>/package (handler code).
 Deploy configuration lives in this package under state/<name>/deploy_input.json.
 """
+import os
 from pathlib import Path
+
+
+def merge_script_env(extra: dict[str, str] | None = None) -> dict[str, str]:
+    """Environment for subprocess shell scripts; disables AWS CLI pager by default."""
+    run_env = os.environ.copy()
+    run_env.setdefault("AWS_PAGER", "")
+    if extra:
+        run_env.update(extra)
+    return run_env
 
 
 def get_workspace_root() -> Path:

@@ -13,6 +13,7 @@ from lib import (
     build_handlers_lambda_manifest_block,
     get_workspace_root,
     get_script_dir,
+    merge_script_env,
     validate_extension_name,
 )
 from runtime_config import cmd_export_lambda_env, cmd_set_profile, ensure_runtime_profile_file
@@ -24,7 +25,7 @@ def _run_script(script_name: str, env: dict[str, str], extra_args: list[str] | N
     if not script.is_file():
         print(f"ERROR: Script not found: {script}")
         return 1
-    run_env = {**os.environ, **env}
+    run_env = merge_script_env(env)
     cmd = [str(script), *(extra_args or [])]
     return subprocess.run(cmd, cwd=get_workspace_root(), env=run_env).returncode
 

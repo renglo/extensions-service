@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# shellcheck source=_common.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_common.sh"
 
 # Deploy extension Handlers as AWS Lambda (shared script).
 # Requires: EXTENSION_NAME, WORKSPACE_ROOT. Args: [deploy|update|undeploy] [--clean]
@@ -121,12 +123,14 @@ if [[ "$ACTION" == "deploy" ]]; then
     --function-name "$FUNCTION_NAME" \
     --region "$AWS_REGION" \
     --zip-file "fileb://$DEPLOYMENT_ZIP" \
-    --cli-input-json "file://$TEMP_CONFIG" || { rm -f "$TEMP_CONFIG"; exit 1; }
+    --cli-input-json "file://$TEMP_CONFIG" \
+    --no-cli-pager || { rm -f "$TEMP_CONFIG"; exit 1; }
 else
   aws lambda update-function-code \
     --function-name "$FUNCTION_NAME" \
     --region "$AWS_REGION" \
-    --zip-file "fileb://$DEPLOYMENT_ZIP" || { rm -f "$TEMP_CONFIG"; exit 1; }
+    --zip-file "fileb://$DEPLOYMENT_ZIP" \
+    --no-cli-pager || { rm -f "$TEMP_CONFIG"; exit 1; }
   python3 -c "
 import json
 with open('$TEMP_CONFIG') as f: c = json.load(f)
@@ -136,7 +140,8 @@ with open('$TEMP_CONFIG', 'w') as f: json.dump(up, f, indent=2)
   aws lambda update-function-configuration \
     --function-name "$FUNCTION_NAME" \
     --region "$AWS_REGION" \
-    --cli-input-json "file://$TEMP_CONFIG" 2>/dev/null || true
+    --cli-input-json "file://$TEMP_CONFIG" \
+    --no-cli-pager 2>/dev/null || true
 fi
 
 rm -f "$TEMP_CONFIG"

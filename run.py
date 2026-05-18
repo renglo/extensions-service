@@ -24,6 +24,7 @@ from lib import (
     get_ecs_handlers_for_extension,
     get_extra_extensions,
     list_extensions,
+    merge_script_env,
     validate_extension,
     validate_extension_name,
 )
@@ -60,7 +61,7 @@ def _run_script(script_name: str, env: dict | None = None, extra_args: list[str]
     if not script.is_file():
         print(f"ERROR: Script not found: {script}", file=sys.stderr)
         return 1
-    run_env = {**os.environ, **(env or {})}
+    run_env = merge_script_env(env)
     cwd = get_workspace_root()
     cmd = [str(script), *(extra_args or [])]
     return subprocess.run(cmd, env=run_env, cwd=cwd).returncode
@@ -72,7 +73,7 @@ def _run_domain_main(domain_dir: str, extension: str, action: str, rest: list[st
         print(f"ERROR: Domain entrypoint not found: {main_py}", file=sys.stderr)
         return 1
     cmd = [sys.executable, str(main_py), extension, action, *rest]
-    return subprocess.run(cmd, cwd=get_workspace_root(), env=os.environ.copy()).returncode
+    return subprocess.run(cmd, cwd=get_workspace_root(), env=merge_script_env()).returncode
 
 
 def cmd_list(_args: list[str]) -> int:
