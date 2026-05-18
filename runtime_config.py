@@ -15,8 +15,8 @@ from state_store import (
 
 
 SIZE_PRESETS = {
-    "small": {"task_cpu": 512, "task_memory": 1024, "ec2_instance_type": "m5.large", "asg_min_size": 0, "asg_desired_capacity": 0, "asg_max_size": 1},
-    "medium": {"task_cpu": 1024, "task_memory": 4096, "ec2_instance_type": "m5.xlarge", "asg_min_size": 0, "asg_desired_capacity": 1, "asg_max_size": 2},
+    "small": {"task_cpu": 512, "task_memory": 1024, "ec2_instance_type": "m5.large", "asg_min_size": 1, "asg_desired_capacity": 1, "asg_max_size": 1},
+    "medium": {"task_cpu": 1024, "task_memory": 4096, "ec2_instance_type": "m5.xlarge", "asg_min_size": 1, "asg_desired_capacity": 1, "asg_max_size": 2},
     "large": {"task_cpu": 2048, "task_memory": 8192, "ec2_instance_type": "m5.2xlarge", "asg_min_size": 1, "asg_desired_capacity": 1, "asg_max_size": 4},
 }
 
