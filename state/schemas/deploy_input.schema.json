@@ -2,17 +2,30 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "ExtensionServiceDeployInput",
   "type": "object",
-  "required": ["state_version", "extension", "updated_at", "lambda_config"],
+  "required": ["GITHUB_REPOSITORY", "ENVIRONMENT", "VARS"],
   "properties": {
-    "state_version": { "type": "integer" },
-    "extension": { "type": "string" },
-    "updated_at": { "type": "string" },
-    "lambda_config": { "type": "object" },
-    "ecs_environment": {
+    "GITHUB_REPOSITORY": { "type": "string" },
+    "ENVIRONMENT": { "type": "string" },
+    "VARS": {
       "type": "object",
       "additionalProperties": {
         "type": ["string", "number", "boolean"]
       }
-    }
+    },
+    "SECRETS": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "lambda_config": { "type": "object", "description": "Legacy format only" },
+    "ecs_environment": {
+      "type": "object",
+      "description": "Legacy format only",
+      "additionalProperties": {
+        "type": ["string", "number", "boolean"]
+      }
+    },
+    "ecr_image_uri": { "type": "string", "description": "Legacy format only" }
   }
 }

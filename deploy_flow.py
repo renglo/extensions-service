@@ -4,7 +4,11 @@ import argparse
 import os
 import subprocess
 
-from deploy_input import resolve_deploy_input_file
+from deploy_input import (
+    get_ecr_image_uri_from_deploy_input,
+    get_runtime_env_from_deploy_input,
+    resolve_deploy_input_file,
+)
 from lib import get_workspace_root, get_script_dir, validate_extension
 from state_store import STATE_VERSION, default_release_manifest, get_state_paths, read_json, utc_now_iso, write_json
 
@@ -63,9 +67,9 @@ def _ecs_is_provisioned(extension: str) -> bool:
     manifest = read_json(paths.provision_manifest)
     if manifest and manifest.get("ecs", {}).get("cluster"):
         return True
-    deploy_input = read_json(paths.deploy_input)
-    if deploy_input:
-        return bool((deploy_input.get("ecs_environment") or {}).get("ECS_CLUSTER"))
+    runtime_env = get_runtime_env_from_deploy_input(extension)
+    if runtime_env.get("ECS_CLUSTER"):
+        return True
     return False
 
 
@@ -117,9 +121,8 @@ def cmd_push(extension: str, args: list[str]) -> int:
     ecs = provision.get("ecs") or {}
     buckets = provision.get("buckets") or {}
 
-    # Fallback source: deploy_input.json (from bootstrap merge / CI)
-    deploy_input = read_json(paths.deploy_input) or {}
-    ecs_env = deploy_input.get("ecs_environment") or {}
+    # Fallback source: deploy_input.json (VARS/SECRETS or legacy ecs_environment)
+    ecs_env = get_runtime_env_from_deploy_input(extension, root)
 
     def _first(*values: str) -> str | None:
         return next((v for v in values if v), None)
@@ -159,11 +162,10 @@ def cmd_push(extension: str, args: list[str]) -> int:
 
     paths = get_state_paths(extension)
     provision = read_json(paths.provision_manifest) or {}
-    deploy_input = read_json(paths.deploy_input) or {}
     release = read_json(paths.release_manifest) or default_release_manifest(extension)
     image_uri = (
         ((provision.get("ecr") or {}).get("image_uri"))
-        or deploy_input.get("ecr_image_uri")
+        or get_ecr_image_uri_from_deploy_input(extension, root)
         or f"{extension}-handlers-ecs:latest"
     )
     release["state_version"] = STATE_VERSION

@@ -9,10 +9,20 @@ if [[ -z "${EXTENSION_NAME:-}" || -z "${WORKSPACE_ROOT:-}" ]]; then
   exit 1
 fi
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SERVICE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
 if [[ -n "${LAMBDA_FUNCTION_NAME:-}" ]]; then
   FUNCTION_NAME="$LAMBDA_FUNCTION_NAME"
 elif [[ -n "${DEPLOY_INPUT_FILE:-}" && -f "${DEPLOY_INPUT_FILE}" ]]; then
-  FUNCTION_NAME=$(python3 -c "import json, os; d=json.load(open(os.environ['DEPLOY_INPUT_FILE'],encoding='utf-8')); print(d['lambda_config']['FunctionName'])")
+  FUNCTION_NAME=$(python3 -c "
+import sys
+sys.path.insert(0, '${SERVICE_ROOT}')
+from pathlib import Path
+from deploy_input import build_lambda_config, deploy_input_from_path
+payload = deploy_input_from_path(Path('${DEPLOY_INPUT_FILE}'))
+print(build_lambda_config(payload, '${EXTENSION_NAME}')['FunctionName'])
+")
 else
   echo "ERROR: Set LAMBDA_FUNCTION_NAME or DEPLOY_INPUT_FILE (path to deploy_input.json)" >&2
   exit 1

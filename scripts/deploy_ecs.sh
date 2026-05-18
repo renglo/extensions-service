@@ -154,21 +154,13 @@ sed -e "s|{{ECS_TASK_FAMILY}}|$ECS_TASK_FAMILY|g" \
     -e "s|{{TASK_CPU}}|$ECS_PROFILE_TASK_CPU|g" \
     -e "s|{{TASK_MEMORY}}|$ECS_PROFILE_TASK_MEMORY|g" \
     "$TASK_DEF_TEMPLATE" > "$TASK_DEF"
-# Task env: optional ecs_environment in DEPLOY_INPUT_FILE, or ECS_ENV_FILE (path to JSON object of name/value)
+# Task env: VARS+SECRETS from DEPLOY_INPUT_FILE (or legacy ecs_environment), or ECS_ENV_FILE
 GENERATED_ECS_ENV_FILE=""
 ECS_ENV_FILE_MERGE=""
 if [[ -n "${DEPLOY_INPUT_FILE:-}" && -f "${DEPLOY_INPUT_FILE}" ]]; then
   GENERATED_ECS_ENV_FILE=$(mktemp)
-  DEPLOY_INPUT_FILE="$DEPLOY_INPUT_FILE" OUTPUT_FILE="$GENERATED_ECS_ENV_FILE" python3 -c "
-import json, os
-src = os.environ['DEPLOY_INPUT_FILE']
-out = os.environ['OUTPUT_FILE']
-data = json.load(open(src, encoding='utf-8'))
-env = data.get('ecs_environment', {})
-if not isinstance(env, dict):
-    env = {}
-json.dump(env, open(out, 'w', encoding='utf-8'), indent=2)
-"
+  python3 "$SERVICE_ROOT/deploy_input.py" export-runtime-env "$DEPLOY_INPUT_FILE" \
+    -o "$GENERATED_ECS_ENV_FILE" || exit 1
   ECS_ENV_FILE_MERGE="$GENERATED_ECS_ENV_FILE"
 elif [[ -n "${ECS_ENV_FILE:-}" && -f "${ECS_ENV_FILE}" ]]; then
   ECS_ENV_FILE_MERGE="$ECS_ENV_FILE"
