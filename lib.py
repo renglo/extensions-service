@@ -109,23 +109,6 @@ def get_function_name(extension: str, workspace_root: Path | None = None) -> str
     return lc.get("FunctionName", resolve_handlers_function_name(extension, workspace_root))
 
 
-def get_handlers_iam_policy_path(extension: str, workspace_root: Path | None = None) -> Path:
-    """Path to IAM policy JSON used by setup_iam_role.sh (committed under installer/service)."""
-    root = workspace_root or get_workspace_root()
-    service_dir = root / "extensions" / extension / "installer" / "service"
-    return service_dir / f"{extension}-handlers-iam-policy.json"
-
-
-def validate_iam_policy_file(extension: str, workspace_root: Path | None = None) -> Path:
-    """Ensure handlers IAM policy file exists."""
-    policy = get_handlers_iam_policy_path(extension, workspace_root)
-    if not policy.is_file():
-        raise FileNotFoundError(
-            f"IAM policy file not found for {extension}: {policy}"
-        )
-    return policy
-
-
 def get_package_dir(extension: str, workspace_root: Path | None = None) -> Path:
     """Return extensions/<extension>/package directory."""
     root = workspace_root or get_workspace_root()

@@ -8,8 +8,9 @@ Short deploy-flow diagram: [DEPLOY_FLOW.md](DEPLOY_FLOW.md).
 
 | Stage | Command | Permissions | Output |
 |-------|---------|-------------|--------|
-| **1 — provision-infra** | `provision-infra apply` | Admin (IAM, ECR, ECS, S3) | `provision_manifest.json`, optional `handlers_github_oidc.json` |
-| **2 — deploy** | `deploy build / push / publish` | DevOps (ECR push, ECS task def) | `release_manifest.json` |
+| **1 — provision-infra** | `provision-infra apply` | Admin (IAM; optional ECR/ECS/S3) | `provision_manifest.json`, optional `handlers_github_oidc.json` |
+| **2a — deploy Lambda** | `deploy build` + `deploy deploy` (zip) | DevOps (Lambda create/update) | Function `{ext}-handlers` on AWS |
+| **2b — deploy ECS** | `deploy build` + `deploy push` + `deploy publish` | DevOps (ECR push, ECS task def) | `release_manifest.json` |
 | **3 — runtime-config** | `runtime set-profile / export-lambda-env` | Moderate (ASG update) | `runtime_profile.json`, `lambda_env_export.json` |
 
 ---
@@ -35,7 +36,7 @@ Re-running **without** `--launch-type` on an environment that already has ECS in
 - **Optional:** GitHub OIDC IAM roles for the handlers repo (`--github-repo Org/repo`), using templates under `utils/github-handlers-*.template.json`. Writes `state/<ext>/handlers_github_oidc.json`. `provision-infra teardown` removes these roles/policies before deleting ECS resources.
 - **Teardown:** `provision-infra teardown --yes` deletes all provisioned AWS resources. By default it also deletes CloudWatch log groups `/ecs/<ext>-handlers-ecs` and, if `state/<ext>/deploy_input.json` defines `lambda_config.FunctionName`, `/aws/lambda/<FunctionName>`. Pass **`--keep-logs`** to retain those log groups (e.g. for audits).
 
-**IAM policy file:** Optional. If `extensions/<name>/installer/service/<name>-handlers-iam-policy.json` exists it is used for the Lambda handlers policy; otherwise a minimal policy is generated from the extension name and account (ECS invoke + S3 handshake).
+**Handlers IAM policy:** Always generated at apply time from the extension name and account (ECS invoke + S3 handshake). No per-extension IAM policy JSON file under `installer/service`.
 
 ```bash
 # Lambda-only (default) — no ECS cluster, ECR, or S3 results bucket
@@ -90,32 +91,111 @@ python3 dev/extensions-service/run.py <extension> provision-infra teardown \
 
 ## Stage 2 — deploy (DevOps / CI profile)
 
-Builds the Docker image and pushes it to ECR. Reads resource names from `provision_manifest.json` — no need to know bucket or cluster names manually.
+Stage 2 has **two separate paths**. Docker is used as a **build tool** in both cases; only the ECS path pushes an image to ECR.
+
+| Target | Build | Publish to AWS | Mechanism |
+|--------|-------|----------------|-----------|
+| **Handlers Lambda** | `deploy build` (or `build`) | `deploy deploy` / `deploy update` | **`lambda_deployment.zip`** via `deploy_as_a_service.sh` (`create-function` / `update-function-code` with `--zip-file`) |
+| **Handlers ECS** | `deploy build` (auto or `--large`) | `deploy push` + `deploy publish` | Docker image → ECR `{ext}-handlers-ecs` + task definition |
+
+
+**Important:** `deploy push` does **not** deploy the Lambda. It only runs `deploy_ecs.sh` (ECR + ECS). For Lambda-only environments, stop after `deploy deploy` — do not run `deploy push`.
+
+Requires `state/<ext>/deploy_input.json` with a `lambda_config` block (function name, role, runtime, env vars). Set `DEPLOY_INPUT_FILE` or place the file at `state/<ext>/deploy_input.json`.
+
+### 2a — Deploy handlers Lambda (zip)
+
+Build produces a zip; deploy uploads it to AWS Lambda.
 
 ```bash
-# After provision-infra apply — deploy build auto-detects ECS and builds both artifacts
+# 1) Build zip (Docker builder image; output: extensions/<ext>/package/lambda_deployment.zip)
+python3 dev/extensions-service/run.py <extension> deploy build
+# shortcut:
+python3 dev/extensions-service/run.py <extension> build
+
+# 2) Create or replace the Lambda function (reads deploy_input.json → lambda_config)
+python3 dev/extensions-service/run.py <extension> deploy deploy --profile my-devops-profile
+python3 dev/extensions-service/run.py <extension> deploy deploy --clean --profile my-devops-profile
+
+# 3) Update code only (function must already exist)
+python3 dev/extensions-service/run.py <extension> deploy update --profile my-devops-profile
+
+# Remove the Lambda function
+python3 dev/extensions-service/run.py <extension> deploy undeploy --profile my-devops-profile
+```
+
+Subcommands `deploy`, `update`, and `undeploy` map to `deploy_as_a_service.sh`. Default **`--type lambda`** (omit `--type ecs`). The script builds the zip automatically if `lambda_deployment.zip` is missing.
+
+**Lambda-only end-to-end** (after `provision-infra apply` without `--launch-type`):
+
+```bash
+python3 dev/extensions-service/run.py <extension> provision-infra apply --profile my-admin-profile
+python3 dev/extensions-service/run.py <extension> deploy build
+python3 dev/extensions-service/run.py <extension> deploy deploy --profile my-devops-profile
+# Do NOT run deploy push — no ECS/ECR was provisioned for handlers.
+```
+
+### 2b — Deploy handlers ECS (ECR + task definition)
+
+Reads ECR repo, S3 bucket, and cluster from `provision_manifest.json` (written by `provision-infra apply --launch-type fargate|ec2`).
+
+```bash
 python3 dev/extensions-service/run.py <extension> deploy build
 python3 dev/extensions-service/run.py <extension> deploy push --profile my-devops-profile
 python3 dev/extensions-service/run.py <extension> deploy publish --type ecs
-
-# Force ECS build before provision-infra has run (e.g. testing the image locally)
-python3 dev/extensions-service/run.py <extension> deploy build --large
-
-# Skip ECS build even though provision_manifest exists (Lambda-only redeploy)
-python3 dev/extensions-service/run.py <extension> deploy build --no-ecs
 ```
 
-**Build behavior:**
+Legacy-style single command (build large image + push ECS in one step):
 
-Lambda zip is **always** built. ECS image is **optional** and built automatically when `provision_manifest.json` shows ECS infra was provisioned (i.e., after `provision-infra apply`). Use `--large` to force ECS build before the manifest exists.
+```bash
+python3 dev/extensions-service/run.py <extension> deploy deploy --type ecs --profile my-devops-profile
+```
+
+**Both Lambda and ECS** (when `handlers_config.json` lists ECS handlers):
+
+```bash
+python3 dev/extensions-service/run.py <extension> deploy build
+python3 dev/extensions-service/run.py <extension> deploy deploy --type default --profile my-devops-profile
+# default: zip Lambda first, then ECS deploy_ecs.sh if EXTERNAL_HANDLERS_ECS_HANDLERS is set
+```
+
+Or split explicitly:
+
+```bash
+python3 dev/extensions-service/run.py <extension> deploy build
+python3 dev/extensions-service/run.py <extension> deploy deploy --profile my-devops-profile
+python3 dev/extensions-service/run.py <extension> deploy push --profile my-devops-profile
+python3 dev/extensions-service/run.py <extension> deploy publish --type ecs
+```
+
+### Build flags (`deploy build` / `build`)
+
+Lambda zip is **always** built. ECS image is **optional** — built when `provision_manifest.json` includes ECS, or when forced.
+
+```bash
+# Force ECS image build before provision-infra (e.g. local image test)
+python3 dev/extensions-service/run.py <extension> deploy build --large
+
+# Skip ECS image even if manifest has ECS (Lambda zip redeploy only)
+python3 dev/extensions-service/run.py <extension> deploy build --no-ecs
+
+# ARM64 zip for run-local on Apple Silicon
+python3 dev/extensions-service/run.py <extension> deploy build --local
+```
 
 | Scenario | Command | Artifacts |
 |----------|---------|-----------|
 | ECS provisioned (auto) | `deploy build` | Lambda zip + ECS image |
-| Lambda only (no ECS manifest) | `deploy build` | Lambda zip only |
+| Lambda only (no ECS in manifest) | `deploy build` | Lambda zip only |
 | Force ECS before provision | `deploy build --large` | Lambda zip + ECS image |
 | Skip ECS even if provisioned | `deploy build --no-ecs` | Lambda zip only |
 | Local ARM (for run-local) | `deploy build --local` | Lambda zip (arm64) |
+
+| Build mode | Docker image (build tool) | Output for deploy |
+|------------|---------------------------|-------------------|
+| Lambda (default) | `<ext>-lambda-builder:latest` (amd64) | `lambda_deployment.zip` → `deploy deploy` |
+| ECS large | `<ext>-ecs-builder:latest` (amd64) | Image → `deploy push` / `deploy deploy --type ecs` |
+| Local ARM | `<ext>-lambda-builder:local` (arm64) | zip or image for `run-local` only |
 
 ---
 
@@ -177,21 +257,20 @@ python3 dev/extensions-service/run.py <extension> test <handler_name> --payload-
 
 All under `dev/extensions-service/state/<extension>/` — gitignored except `state/schemas/`.
 
-| File | Written by | Contents |
-|------|-----------|----------|
-| `provision_manifest.json` | `provision-infra apply` | `lambda.LAMBDA_EXTERNAL_HANDLERS_ARN`, ECR URI, S3 bucket, ECS cluster, subnets, SGs |
-| `handlers_github_oidc.json` | `provision-infra apply` (with `--github-repo`) | Handlers repo OIDC role ARNs, policy names, GitHub repo string |
-| `runtime_profile.json` | `provision-infra apply`, `runtime set-profile` | launch_type, network_mode, CPU/memory, ASG sizing |
-| `release_manifest.json` | `deploy build/push/publish` | last build, last push, last publish timestamps |
-| `lambda_env_export.json` | `provision-infra export`, `runtime export-lambda-env` | Env vars ready for `launcher/vars.json` |
-| `deploy_input.json` | Manual / CI | `lambda_config` (Lambda create payload) + `ecs_environment` (task env vars) |
+| File | Written by | Stage 2 role |
+|------|-----------|--------------|
+| `deploy_input.json` | **bootstrap merge** (copy from `bootstrap/state/<ext>/`) | **Required for stage 2.** Contains `lambda_config` (complete Lambda create payload) + `ecs_environment` (task env vars) + `ecr_image_uri`. Self-sufficient — no other file needed for a local or CI deploy. |
+| `provision_manifest.json` | `provision-infra apply` | Optional. Values take priority over `deploy_input` where both exist (AWS region, ECR, ECS cluster, bucket). |
+| `runtime_profile.json` | `provision-infra apply`, `runtime set-profile` | Optional. When present, used for ECS launch profile (CPU, memory, launch type). When absent, `deploy_input.ecs_environment` supplies `ECS_LAUNCH_TYPE` / `ECS_NETWORK_MODE`. |
+| `handlers_github_oidc.json` | `provision-infra apply` (with `--github-repo`) | Handlers repo OIDC role ARNs — not used by stage 2 deploy scripts directly. |
+| `release_manifest.json` | `deploy build/push/publish` | Tracks last build, push, and publish timestamps. |
+| `lambda_env_export.json` | `provision-infra export`, `runtime export-lambda-env` | Env vars ready for `launcher/vars.json` (Stage 3 / `provision-infra export`). |
 
 ---
 
 ## Per-extension repo layout
 
 - **`extensions/<name>/package/`** — handler code and `pyproject.toml` (required for build/run-local/list).
-- **`extensions/<name>/installer/service/<name>-handlers-iam-policy.json`** — optional override for the Lambda handlers IAM policy; if missing, `provision-infra apply` / `setup-iam` generate a minimal policy from resource names.
 - **`extensions/<name>/package/handlers_config.json`** — handler routing for `lambda_router.py`.
 - **`dev/extensions-service/state/<name>/`** — generated locally (gitignored except `schemas/`).
 
@@ -210,11 +289,11 @@ If the first `pip install` fails (e.g. missing gcc), the build retries with `--o
 
 ## Notes
 
-**Deploy reads `provision_manifest.json`** for ECR repo, S3 bucket, and cluster names — no manual env var injection needed for deploy.
+**Handlers Lambda vs launcher backend Lambda:** This service deploys the **handlers** function (`{ext}-handlers`) as a **zip** package. The **backend** Lambda (`{env}-backend-production`) and its ECR repo are provisioned by **bootstrap → launcher**, not by `deploy push` here.
+
+**`deploy_input.json` is the single source of truth for stage 2.** After running `python bootstrap/install.py`, copy `bootstrap/state/<ext>/deploy_input.json` to `dev/extensions-service/state/<ext>/deploy_input.json`. It contains everything `deploy deploy` and `deploy push` need — no separate `provision_manifest.json` or `runtime_profile.json` required. Set `DEPLOY_INPUT_FILE=/path/to/file` to override the default location.
 
 **`launcher/vars.json` ECS entries** (e.g. `ECS_CLUSTER`, `ECS_SUBNETS`) come from `provision-infra export` output. Run it after first apply and after any VPC or runtime profile change.
-
-**`deploy_input.json`** is needed for Lambda deploys (`lambda_config`) and for injecting custom env vars into the ECS task (`ecs_environment`). Set `DEPLOY_INPUT_FILE=/path/to/file` or place it at `state/<ext>/deploy_input.json`.
 
 **Windows / WSL:** if shell scripts fail with carriage return errors, run:
 ```bash

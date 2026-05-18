@@ -7,9 +7,8 @@ set -euo pipefail
 # for this extension: ecs:RunTask on the task definition, iam:PassRole on the ECS
 # roles, and s3:PutObject/GetObject on the results bucket.
 #
-# If extensions/<ext>/installer/service/<ext>-handlers-iam-policy.json exists it is
-# used as-is (custom overrides). Otherwise the policy is generated dynamically from
-# the extension name and AWS account — no file needs to be committed.
+# Policy document is always generated from the extension name and AWS account
+# (ECS invoke + S3 handshake). No per-extension IAM policy JSON file is used.
 #
 # Requires: EXTENSION_NAME, WORKSPACE_ROOT
 # Optional: AWS_REGION, AWS_PROFILE
@@ -20,8 +19,6 @@ if [[ -z "${EXTENSION_NAME:-}" || -z "${WORKSPACE_ROOT:-}" ]]; then
 fi
 
 WORKSPACE_ROOT="$(cd "$WORKSPACE_ROOT" && pwd)"
-SERVICE_DIR="$WORKSPACE_ROOT/extensions/$EXTENSION_NAME/installer/service"
-POLICY_FILE="$SERVICE_DIR/${EXTENSION_NAME}-handlers-iam-policy.json"
 POLICY_NAME="$(echo "${EXTENSION_NAME:0:1}" | tr '[:lower:]' '[:upper:]')${EXTENSION_NAME:1}HandlersPolicy"
 ROLE_NAME="${EXTENSION_NAME}-handlers-role"
 AWS_REGION="${AWS_REGION:-us-east-1}"
@@ -40,15 +37,10 @@ echo "Role:   $ROLE_NAME"
 echo "=========================================="
 echo ""
 
-# Resolve or generate the policy document
-GENERATED_POLICY_FILE=""
-if [[ -f "$POLICY_FILE" ]]; then
-  echo "Using custom policy file: $POLICY_FILE"
-  EFFECTIVE_POLICY_FILE="$POLICY_FILE"
-else
-  echo "Generating policy for $EXTENSION_NAME (no custom file at $POLICY_FILE)"
-  GENERATED_POLICY_FILE=$(mktemp --suffix=.json)
-  python3 - <<PY
+# Generate the policy document
+GENERATED_POLICY_FILE=$(mktemp --suffix=.json)
+echo "Generating policy for $EXTENSION_NAME"
+python3 - <<PY
 import json
 
 account = "$AWS_ACCOUNT"
@@ -88,8 +80,7 @@ with open("$GENERATED_POLICY_FILE", "w") as f:
     json.dump(policy, f, indent=2)
 print("Policy generated.")
 PY
-  EFFECTIVE_POLICY_FILE="$GENERATED_POLICY_FILE"
-fi
+EFFECTIVE_POLICY_FILE="$GENERATED_POLICY_FILE"
 
 # Create or update the managed policy
 if aws iam get-policy --policy-arn "$POLICY_ARN" >/dev/null 2>&1; then

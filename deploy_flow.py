@@ -58,10 +58,15 @@ def _build_single(extension: str, root, large: bool, local: bool) -> int:
 
 
 def _ecs_is_provisioned(extension: str) -> bool:
-    """Return True if provision_manifest.json exists with an ECS cluster — meaning ECS infra is live."""
+    """Return True if ECS infra is configured — from provision_manifest OR deploy_input."""
     paths = get_state_paths(extension)
     manifest = read_json(paths.provision_manifest)
-    return bool(manifest and manifest.get("ecs", {}).get("cluster"))
+    if manifest and manifest.get("ecs", {}).get("cluster"):
+        return True
+    deploy_input = read_json(paths.deploy_input)
+    if deploy_input:
+        return bool((deploy_input.get("ecs_environment") or {}).get("ECS_CLUSTER"))
+    return False
 
 
 def cmd_build(extension: str, args: list[str]) -> int:
@@ -89,9 +94,9 @@ def cmd_build(extension: str, args: list[str]) -> int:
     if rc != 0:
         return rc
 
-    # ECS image: explicit flag OR auto-detected from provision manifest
+    # ECS image: explicit flag OR auto-detected from provision_manifest / deploy_input
     if not skip_ecs and (force_large or _ecs_is_provisioned(extension)):
-        source = "--large flag" if force_large else "provision_manifest.json"
+        source = "--large flag" if force_large else "deploy_input / provision_manifest"
         print(f"==> Building ECS image (detected from {source})...")
         return _build_single(extension, root, large=True, local=False)
 
@@ -106,31 +111,61 @@ def cmd_push(extension: str, args: list[str]) -> int:
     parsed, remaining = parser.parse_known_args(args)
     env = {"EXTENSION_NAME": extension, "WORKSPACE_ROOT": str(root)}
     paths = get_state_paths(extension)
+
+    # Primary source: provision_manifest.json (from provision-infra apply)
     provision = read_json(paths.provision_manifest) or {}
     ecs = provision.get("ecs") or {}
     buckets = provision.get("buckets") or {}
-    if provision.get("aws_region"):
-        env["AWS_REGION"] = str(provision["aws_region"])
-    if buckets.get("ecs_results_bucket"):
-        env["ECS_RESULTS_BUCKET"] = str(buckets["ecs_results_bucket"])
-    if ecs.get("cluster"):
-        env["ECS_CLUSTER"] = str(ecs["cluster"])
-    if ecs.get("task_definition"):
-        env["ECS_TASK_DEFINITION"] = str(ecs["task_definition"])
+
+    # Fallback source: deploy_input.json (from bootstrap merge / CI)
+    deploy_input = read_json(paths.deploy_input) or {}
+    ecs_env = deploy_input.get("ecs_environment") or {}
+
+    def _first(*values: str) -> str | None:
+        return next((v for v in values if v), None)
+
+    aws_region = _first(provision.get("aws_region"), ecs_env.get("AWS_REGION"))
+    ecs_results_bucket = _first(buckets.get("ecs_results_bucket"), ecs_env.get("ECS_RESULTS_BUCKET"))
+    ecs_cluster = _first(ecs.get("cluster"), ecs_env.get("ECS_CLUSTER"))
+    ecs_task_def = _first(ecs.get("task_definition"), ecs_env.get("ECS_TASK_DEFINITION"))
+
+    if aws_region:
+        env["AWS_REGION"] = aws_region
+    if ecs_results_bucket:
+        env["ECS_RESULTS_BUCKET"] = ecs_results_bucket
+    if ecs_cluster:
+        env["ECS_CLUSTER"] = ecs_cluster
+    if ecs_task_def:
+        env["ECS_TASK_DEFINITION"] = ecs_task_def
+
+    # ECS launch profile: use file if present, otherwise inject key vars from ecs_environment
     if paths.runtime_profile.is_file():
         env["ECS_PROFILE_FILE"] = str(paths.runtime_profile)
+    else:
+        if ecs_env.get("ECS_LAUNCH_TYPE"):
+            env["ECS_PROFILE_LAUNCH_TYPE"] = str(ecs_env["ECS_LAUNCH_TYPE"])
+        if ecs_env.get("ECS_NETWORK_MODE"):
+            env["ECS_PROFILE_NETWORK_MODE"] = str(ecs_env["ECS_NETWORK_MODE"])
+
     deploy_input_file = resolve_deploy_input_file(extension, root)
     if deploy_input_file is not None:
         env["DEPLOY_INPUT_FILE"] = str(deploy_input_file)
     if parsed.profile:
         env["AWS_PROFILE"] = parsed.profile
+
     rc = _run_script("deploy_ecs.sh", env=env, extra_args=remaining)
     if rc != 0:
         return rc
+
     paths = get_state_paths(extension)
     provision = read_json(paths.provision_manifest) or {}
+    deploy_input = read_json(paths.deploy_input) or {}
     release = read_json(paths.release_manifest) or default_release_manifest(extension)
-    image_uri = (((provision.get("ecr") or {}).get("image_uri")) or f"{extension}-handlers-ecs:latest")
+    image_uri = (
+        ((provision.get("ecr") or {}).get("image_uri"))
+        or deploy_input.get("ecr_image_uri")
+        or f"{extension}-handlers-ecs:latest"
+    )
     release["state_version"] = STATE_VERSION
     release["updated_at"] = utc_now_iso()
     release["last_push"] = {"image_uri": image_uri, "created_at": utc_now_iso()}

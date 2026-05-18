@@ -26,7 +26,6 @@ from lib import (
     list_extensions,
     validate_extension,
     validate_extension_name,
-    validate_iam_policy_file,
 )
 from deploy_flow import cmd_build as deploy_build, cmd_publish as deploy_publish, cmd_push as deploy_push
 from deploy_input import resolve_deploy_input_file
@@ -157,7 +156,6 @@ def cmd_deploy(extension: str, args: list[str]) -> int:
 
 def cmd_setup_iam(extension: str, args: list[str]) -> int:
     validate_extension(extension)
-    validate_iam_policy_file(extension, get_workspace_root())
     profile, _ = _parse_profile_and_filter_args(args)
     env = {
         "EXTENSION_NAME": extension,
