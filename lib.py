@@ -66,7 +66,7 @@ def validate_extension_name(extension: str) -> str:
 
 
 def resolve_handlers_function_name(extension: str, workspace_root: Path | None = None) -> str:
-    """Handlers Lambda name: deploy_input.lambda_config.FunctionName or {extension}-handlers."""
+    """Handlers Lambda name from deploy_input VARS or {extension}-handlers."""
     from deploy_input import load_lambda_config_from_deploy_input
 
     lc = load_lambda_config_from_deploy_input(extension, workspace_root)
@@ -96,7 +96,7 @@ def build_handlers_lambda_manifest_block(
 
 
 def get_function_name(extension: str, workspace_root: Path | None = None) -> str:
-    """Read Lambda function name from deploy_input.lambda_config (raises if deploy_input missing)."""
+    """Read Lambda function name from deploy_input VARS (raises if deploy_input missing)."""
     from deploy_input import load_lambda_config_from_deploy_input
     from state_store import get_state_paths
 

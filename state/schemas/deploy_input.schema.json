@@ -1,31 +1,35 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "ExtensionServiceDeployInput",
+  "description": "Stage-2 deploy payload and handlers GitHub Environment source. Deploy merges VARS + SECRETS into Lambda/ECS runtime except AWS_GITHUB_OIDC_ROLE_ARN.",
   "type": "object",
   "required": ["GITHUB_REPOSITORY", "ENVIRONMENT", "VARS"],
+  "additionalProperties": false,
   "properties": {
-    "GITHUB_REPOSITORY": { "type": "string" },
-    "ENVIRONMENT": { "type": "string" },
+    "GITHUB_REPOSITORY": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Handlers repo for inject_github_env_vars (org/repo)."
+    },
+    "ENVIRONMENT": {
+      "type": "string",
+      "minLength": 1,
+      "description": "GitHub Environment name (e.g. production)."
+    },
     "VARS": {
       "type": "object",
+      "minProperties": 1,
+      "description": "Variables for GitHub Environment and Lambda/ECS runtime (merged at deploy).",
       "additionalProperties": {
         "type": ["string", "number", "boolean"]
       }
     },
     "SECRETS": {
       "type": "object",
+      "description": "GitHub Environment secrets. AWS_GITHUB_OIDC_ROLE_ARN is CI-only (not injected into Lambda/ECS). Other keys (e.g. OPENAI_API_KEY) are merged into runtime env at deploy.",
       "additionalProperties": {
         "type": "string"
       }
-    },
-    "lambda_config": { "type": "object", "description": "Legacy format only" },
-    "ecs_environment": {
-      "type": "object",
-      "description": "Legacy format only",
-      "additionalProperties": {
-        "type": ["string", "number", "boolean"]
-      }
-    },
-    "ecr_image_uri": { "type": "string", "description": "Legacy format only" }
+    }
   }
 }

@@ -121,7 +121,7 @@ def cmd_push(extension: str, args: list[str]) -> int:
     ecs = provision.get("ecs") or {}
     buckets = provision.get("buckets") or {}
 
-    # Fallback source: deploy_input.json (VARS/SECRETS or legacy ecs_environment)
+    # Fallback source: deploy_input.json (VARS / SECRETS)
     ecs_env = get_runtime_env_from_deploy_input(extension, root)
 
     def _first(*values: str) -> str | None:
@@ -141,7 +141,7 @@ def cmd_push(extension: str, args: list[str]) -> int:
     if ecs_task_def:
         env["ECS_TASK_DEFINITION"] = ecs_task_def
 
-    # ECS launch profile: use file if present, otherwise inject key vars from ecs_environment
+    # ECS launch profile: use file if present, otherwise inject key vars from deploy_input VARS
     if paths.runtime_profile.is_file():
         env["ECS_PROFILE_FILE"] = str(paths.runtime_profile)
     else:

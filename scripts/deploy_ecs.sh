@@ -154,7 +154,7 @@ sed -e "s|{{ECS_TASK_FAMILY}}|$ECS_TASK_FAMILY|g" \
     -e "s|{{TASK_CPU}}|$ECS_PROFILE_TASK_CPU|g" \
     -e "s|{{TASK_MEMORY}}|$ECS_PROFILE_TASK_MEMORY|g" \
     "$TASK_DEF_TEMPLATE" > "$TASK_DEF"
-# Task env: VARS+SECRETS from DEPLOY_INPUT_FILE (or legacy ecs_environment), or ECS_ENV_FILE
+# Task env: VARS+SECRETS from DEPLOY_INPUT_FILE, or ECS_ENV_FILE
 GENERATED_ECS_ENV_FILE=""
 ECS_ENV_FILE_MERGE=""
 if [[ -n "${DEPLOY_INPUT_FILE:-}" && -f "${DEPLOY_INPUT_FILE}" ]]; then

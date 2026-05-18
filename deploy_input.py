@@ -10,7 +10,7 @@ from typing import Any
 from lib import get_workspace_root
 from state_store import get_state_paths, read_json
 
-# Keys in SECRETS (or VARS) that must not be injected into Lambda/ECS runtime env.
+# Keys in SECRETS that must not be injected into Lambda/ECS runtime env.
 RUNTIME_ENV_EXCLUDE: frozenset[str] = frozenset(
     {
         "AWS_GITHUB_OIDC_ROLE_ARN",
@@ -41,16 +41,23 @@ def resolve_deploy_input_file(extension: str, workspace_root: Path | None = None
     return None
 
 
+def validate_deploy_input_payload(payload: dict[str, Any]) -> None:
+    """Require GitHub-environment envelope: GITHUB_REPOSITORY, ENVIRONMENT, VARS; SECRETS optional."""
+    if not isinstance(payload.get("VARS"), dict):
+        raise ValueError("deploy_input.json must contain a VARS object")
+    for key in ("GITHUB_REPOSITORY", "ENVIRONMENT"):
+        if not str(payload.get(key) or "").strip():
+            raise ValueError(f"deploy_input.json must contain {key}")
+
+
 def load_deploy_input_payload(extension: str, workspace_root: Path | None = None) -> dict[str, Any] | None:
     p = resolve_deploy_input_file(extension, workspace_root)
     if p is None:
         return None
-    return read_json(p)
-
-
-def is_github_env_shape(payload: dict[str, Any]) -> bool:
-    """True when deploy_input uses VARS/SECRETS envelope (Option B)."""
-    return isinstance(payload.get("VARS"), dict)
+    payload = read_json(p)
+    if payload is not None:
+        validate_deploy_input_payload(payload)
+    return payload
 
 
 def _string_vars(raw: dict[str, Any] | None) -> dict[str, str]:
@@ -68,80 +75,47 @@ def build_runtime_environment(
     *,
     for_lambda: bool = False,
 ) -> dict[str, str]:
-    """
-    Merge VARS + SECRETS into a flat env map for Lambda or ECS.
-
-    Excludes RUNTIME_ENV_EXCLUDE (e.g. AWS_GITHUB_OIDC_ROLE_ARN).
-    Supports legacy deploy_input (ecs_environment / lambda_config.Environment.Variables).
-    """
-    if is_github_env_shape(payload):
-        merged: dict[str, str] = {}
-        merged.update(_string_vars(payload.get("VARS")))
-        secrets = _string_vars(payload.get("SECRETS"))
-        for key, value in secrets.items():
-            if key not in RUNTIME_ENV_EXCLUDE:
-                merged[key] = value
-        if for_lambda:
-            return {"PYTHONPATH": "/var/task", **merged}
-        return merged
-
-    # Legacy format
-    legacy_ecs = payload.get("ecs_environment")
-    if isinstance(legacy_ecs, dict):
-        env = _string_vars(legacy_ecs)
-    else:
-        lc = payload.get("lambda_config") or {}
-        env_vars = (lc.get("Environment") or {}).get("Variables") or {}
-        env = _string_vars(env_vars if isinstance(env_vars, dict) else {})
-        if for_lambda:
-            return env
-        return {k: v for k, v in env.items() if k != "PYTHONPATH"}
-
+    """Merge VARS + SECRETS into a flat env map for Lambda or ECS (excludes RUNTIME_ENV_EXCLUDE)."""
+    validate_deploy_input_payload(payload)
+    merged: dict[str, str] = {}
+    merged.update(_string_vars(payload.get("VARS")))
+    secrets = _string_vars(payload.get("SECRETS"))
+    for key, value in secrets.items():
+        if key not in RUNTIME_ENV_EXCLUDE:
+            merged[key] = value
     if for_lambda:
-        return {"PYTHONPATH": "/var/task", **env}
-    return env
+        return {"PYTHONPATH": "/var/task", **merged}
+    return merged
 
 
 def _function_name_from_payload(payload: dict[str, Any], extension: str) -> str:
-    if is_github_env_shape(payload):
-        vars_block = payload.get("VARS") or {}
-        if isinstance(vars_block, dict):
-            for key in ("LAMBDA_HANDLERS_FUNCTION_NAME", "LAMBDA_FUNCTION_NAME"):
-                name = vars_block.get(key)
-                if name:
-                    return str(name)
-    lc = payload.get("lambda_config")
-    if isinstance(lc, dict) and lc.get("FunctionName"):
-        return str(lc["FunctionName"])
+    validate_deploy_input_payload(payload)
+    vars_block = payload.get("VARS") or {}
+    for key in ("LAMBDA_HANDLERS_FUNCTION_NAME", "LAMBDA_FUNCTION_NAME"):
+        name = vars_block.get(key)
+        if name:
+            return str(name)
     return f"{extension}-handlers"
 
 
 def build_lambda_config(payload: dict[str, Any], extension: str) -> dict[str, Any]:
-    """Build aws lambda create-function / update-function-configuration JSON."""
-    if isinstance(payload.get("lambda_config"), dict) and not is_github_env_shape(payload):
-        return dict(payload["lambda_config"])
-
-    function_name = _function_name_from_payload(payload, extension)
-    env_vars = build_runtime_environment(payload, for_lambda=True)
+    """Build aws lambda create-function / update-function-configuration JSON from deploy_input."""
+    validate_deploy_input_payload(payload)
     return {
-        "FunctionName": function_name,
+        "FunctionName": _function_name_from_payload(payload, extension),
         "Role": f"{extension}-handlers-role",
         "Handler": _LAMBDA_HANDLER,
         "Runtime": _LAMBDA_RUNTIME,
         "Timeout": _LAMBDA_TIMEOUT,
         "MemorySize": _LAMBDA_MEMORY_SIZE,
-        "Environment": {"Variables": env_vars},
+        "Environment": {"Variables": build_runtime_environment(payload, for_lambda=True)},
     }
 
 
 def get_ecr_image_uri_from_payload(payload: dict[str, Any]) -> str | None:
-    if is_github_env_shape(payload):
-        vars_block = payload.get("VARS") or {}
-        if isinstance(vars_block, dict):
-            uri = vars_block.get("ECR_IMAGE_URI")
-            if uri:
-                return str(uri)
-    uri = payload.get("ecr_image_uri")
+    validate_deploy_input_payload(payload)
+    vars_block = payload.get("VARS") or {}
+    uri = vars_block.get("ECR_IMAGE_URI")
     return str(uri) if uri else None
 
 
@@ -149,11 +123,8 @@ def deploy_input_from_path(path: Path) -> dict[str, Any]:
     payload = read_json(path)
     if payload is None:
         raise FileNotFoundError(path)
-    if is_github_env_shape(payload):
-        return payload
-    if "lambda_config" in payload:
-        return payload
-    raise ValueError(f"{path} must contain VARS (and optional SECRETS) or legacy lambda_config")
+    validate_deploy_input_payload(payload)
+    return payload
 
 
 def load_lambda_config_from_deploy_input(
@@ -162,9 +133,6 @@ def load_lambda_config_from_deploy_input(
     payload = load_deploy_input_payload(extension, workspace_root)
     if not payload:
         return None
-    if isinstance(payload.get("lambda_config"), dict) and not is_github_env_shape(payload):
-        cfg = payload["lambda_config"]
-        return cfg if isinstance(cfg, dict) else None
     return build_lambda_config(payload, extension)
 
 
@@ -204,7 +172,11 @@ def _cli_export_lambda_config(args: argparse.Namespace) -> int:
     if not extension:
         print("ERROR: --extension is required", file=sys.stderr)
         return 1
-    cfg = build_lambda_config(payload, extension)
+    try:
+        cfg = build_lambda_config(payload, extension)
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
     out = Path(args.output) if args.output else Path("-")
     text = json.dumps(cfg, indent=2) + "\n"
     if str(out) == "-":
@@ -219,7 +191,11 @@ def _cli_export_runtime_env(args: argparse.Namespace) -> int:
     if not payload:
         print(f"ERROR: could not read {args.path}", file=sys.stderr)
         return 1
-    env = build_runtime_environment(payload, for_lambda=False)
+    try:
+        env = build_runtime_environment(payload, for_lambda=False)
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
     out = Path(args.output) if args.output else Path("-")
     text = json.dumps(env, indent=2) + "\n"
     if str(out) == "-":
