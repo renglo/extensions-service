@@ -145,7 +145,13 @@ with open('$TEMP_CONFIG', 'w') as f: json.dump(up, f, indent=2)
 fi
 
 rm -f "$TEMP_CONFIG"
+
+LAMBDA_LOG_GROUP="/aws/lambda/${FUNCTION_NAME}"
+echo "==> CloudWatch log group..."
+ensure_cloudwatch_log_group "$LAMBDA_LOG_GROUP" "$AWS_REGION"
+
 echo ""
 echo "Deployment complete: $FUNCTION_NAME ($AWS_REGION)"
-echo "Logs: aws logs tail /aws/lambda/$FUNCTION_NAME --follow --region $AWS_REGION"
+echo "Logs: aws logs tail $LAMBDA_LOG_GROUP --follow --region $AWS_REGION"
+echo "      python3 run.py $EXTENSION_NAME view-logs --follow"
 echo ""

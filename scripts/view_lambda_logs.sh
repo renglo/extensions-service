@@ -55,6 +55,22 @@ echo "CloudWatch Logs: $LOG_GROUP"
 echo "=========================================="
 echo ""
 
+if ! aws logs describe-log-groups --log-group-name-prefix "$LOG_GROUP" --region "$AWS_REGION" \
+  --query "logGroups[?logGroupName=='${LOG_GROUP}'].logGroupName" --output text 2>/dev/null \
+  | grep -qF "$LOG_GROUP"; then
+  echo "Log group not found; creating $LOG_GROUP ..."
+  ensure_cloudwatch_log_group "$LOG_GROUP" "$AWS_REGION"
+fi
+
+if ! aws logs describe-log-groups --log-group-name-prefix "$LOG_GROUP" --region "$AWS_REGION" \
+  --query "logGroups[?logGroupName=='${LOG_GROUP}'].logGroupName" --output text 2>/dev/null \
+  | grep -qF "$LOG_GROUP"; then
+  echo "ERROR: Log group $LOG_GROUP does not exist in $AWS_REGION." >&2
+  echo "       Run: python3 run.py $EXTENSION_NAME deploy deploy --profile <aws-profile>" >&2
+  echo "       Or invoke the function once (Lambda creates the group on first run if IAM allows it)." >&2
+  exit 1
+fi
+
 if [[ "$FOLLOW" == "true" ]]; then
   if [[ -n "$FILTER_PATTERN" ]]; then
     aws logs tail "$LOG_GROUP" --region "$AWS_REGION" --follow --format short --filter-pattern "$FILTER_PATTERN"
