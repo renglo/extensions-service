@@ -10,11 +10,11 @@ from typing import Any
 import boto3
 from botocore.exceptions import ClientError
 
+from constants import REGLO_DEPLOYMENT_DESCRIPTION
 from state_store import STATE_VERSION, utc_now_iso, write_json
 
 OIDC_URL = "https://token.actions.githubusercontent.com"
 OIDC_THUMBPRINT = "6938fd4d98bab03faadb97b34396831e3780aea1"
-HANDLERS_OIDC_DESCRIPTION = "GitHub Actions handlers ECS deploy"
 
 _UTILS_DIR = Path(__file__).resolve().parent / "utils"
 _TRUST_TEMPLATE = _UTILS_DIR / "github-handlers-oidc-trust.template.json"
@@ -83,6 +83,7 @@ def _ensure_role_and_policy(
                 RoleName=role_name,
                 PolicyDocument=json.dumps(trust_policy),
             )
+            iam.update_role_description(RoleName=role_name, Description=REGLO_DEPLOYMENT_DESCRIPTION)
     except ClientError as exc:
         if exc.response.get("Error", {}).get("Code") != "NoSuchEntity":
             raise
@@ -90,7 +91,7 @@ def _ensure_role_and_policy(
             iam.create_role(
                 RoleName=role_name,
                 AssumeRolePolicyDocument=json.dumps(trust_policy),
-                Description=HANDLERS_OIDC_DESCRIPTION,
+                Description=REGLO_DEPLOYMENT_DESCRIPTION,
             )
 
     try:
@@ -112,7 +113,7 @@ def _ensure_role_and_policy(
             iam.create_policy(
                 PolicyName=policy_name,
                 PolicyDocument=json.dumps(permissions_policy),
-                Description=HANDLERS_OIDC_DESCRIPTION,
+                Description=REGLO_DEPLOYMENT_DESCRIPTION,
             )
 
     if apply_changes:

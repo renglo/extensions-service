@@ -85,6 +85,7 @@ if ! aws s3api head-bucket --bucket "$ECS_BUCKET" 2>/dev/null; then
     $([[ "$AWS_REGION" != "us-east-1" ]] && echo "--create-bucket-configuration LocationConstraint=$AWS_REGION" || true)
   echo "Created bucket $ECS_BUCKET"
 fi
+reglo_tag_s3_bucket "$ECS_BUCKET"
 # Lifecycle: expire payloads/ and results/ after 1 day
 LIFECYCLE_FILE="$UTILS_DIR/s3-lifecycle-payloads-results.json"
 aws s3api put-bucket-lifecycle-configuration --bucket "$ECS_BUCKET" --lifecycle-configuration "file://$LIFECYCLE_FILE"
@@ -95,6 +96,7 @@ if ! aws ecr describe-repositories --repository-names "$ECR_REPO" --region "$AWS
   aws ecr create-repository --repository-name "$ECR_REPO" --region "$AWS_REGION"
   echo "Created ECR repo $ECR_REPO"
 fi
+reglo_tag_ecr_repository "$ECR_REPO" "$AWS_REGION"
 ECR_URI="${AWS_ACCOUNT}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:latest"
 aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "${AWS_ACCOUNT}.dkr.ecr.${AWS_REGION}.amazonaws.com"
 docker tag "$DOCKER_IMAGE" "$ECR_URI"
@@ -103,25 +105,31 @@ echo "Pushed $ECR_URI"
 
 echo "==> ECS cluster..."
 if ! aws ecs describe-clusters --clusters "$ECS_CLUSTER" --region "$AWS_REGION" --query 'clusters[0].status' --output text 2>/dev/null | grep -q ACTIVE; then
-  aws ecs create-cluster --cluster-name "$ECS_CLUSTER" --region "$AWS_REGION"
+  aws ecs create-cluster --cluster-name "$ECS_CLUSTER" --region "$AWS_REGION" \
+    --tags "key=Description,value=${REGLO_DEPLOYMENT_DESCRIPTION}"
   echo "Created cluster $ECS_CLUSTER"
 fi
+reglo_tag_ecs_cluster "$ECS_CLUSTER" "$AWS_REGION"
 
 echo "==> IAM roles..."
 # Execution role (for ECR pull and CloudWatch logs)
 if ! aws iam get-role --role-name "$EXECUTION_ROLE_NAME" 2>/dev/null; then
-  aws iam create-role --role-name "$EXECUTION_ROLE_NAME" \
-    --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ecs-tasks.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
+  reglo_create_iam_role "$EXECUTION_ROLE_NAME" \
+    '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ecs-tasks.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
   aws iam attach-role-policy --role-name "$EXECUTION_ROLE_NAME" --policy-arn "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
   echo "Created execution role $EXECUTION_ROLE_NAME"
+else
+  reglo_ensure_iam_role_description "$EXECUTION_ROLE_NAME"
 fi
 EXECUTION_ROLE_ARN="arn:aws:iam::${AWS_ACCOUNT}:role/${EXECUTION_ROLE_NAME}"
 
 # Task role (for S3, ECR, and Lambda invoke)
 if ! aws iam get-role --role-name "$TASK_ROLE_NAME" 2>/dev/null; then
-  aws iam create-role --role-name "$TASK_ROLE_NAME" \
-    --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ecs-tasks.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
+  reglo_create_iam_role "$TASK_ROLE_NAME" \
+    '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ecs-tasks.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
   echo "Created task role $TASK_ROLE_NAME"
+else
+  reglo_ensure_iam_role_description "$TASK_ROLE_NAME"
 fi
 # Always apply/update inline policy from template (safe: replaces only this policy, no accumulation)
 TASK_POLICY=$(mktemp)
@@ -183,7 +191,7 @@ with open(task_def_path, 'w') as f:
 "
   echo "Merged container environment from deploy input / ECS_ENV_FILE into task definition"
 fi
-aws logs create-log-group --log-group-name "/ecs/${ECS_TASK_FAMILY}" --region "$AWS_REGION" 2>/dev/null || true
+ensure_cloudwatch_log_group "/ecs/${ECS_TASK_FAMILY}" "$AWS_REGION"
 aws ecs register-task-definition --cli-input-json "file://$TASK_DEF" --region "$AWS_REGION" >/dev/null
 rm -f "$TASK_DEF"
 echo "Registered task definition $ECS_TASK_FAMILY"

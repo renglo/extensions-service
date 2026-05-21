@@ -58,6 +58,7 @@ if ! aws s3api head-bucket --bucket "$ECS_BUCKET" 2>/dev/null; then
 else
   echo "Bucket $ECS_BUCKET already exists"
 fi
+reglo_tag_s3_bucket "$ECS_BUCKET"
 LIFECYCLE_FILE="$UTILS_DIR/s3-lifecycle-payloads-results.json"
 if [[ -f "$LIFECYCLE_FILE" ]]; then
   aws s3api put-bucket-lifecycle-configuration --bucket "$ECS_BUCKET" --lifecycle-configuration "file://$LIFECYCLE_FILE"
@@ -73,6 +74,7 @@ if ! aws ecr describe-repositories --repository-names "$ECR_REPO" --region "$AWS
 else
   echo "ECR repo $ECR_REPO already exists"
 fi
+reglo_tag_ecr_repository "$ECR_REPO" "$AWS_REGION"
 ECR_BASE_URI="${AWS_ACCOUNT}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}"
 
 # --- ECS cluster ---
@@ -83,9 +85,11 @@ CLUSTER_STATUS=$(aws ecs describe-clusters --clusters "$ECS_CLUSTER" --region "$
 if [[ "$CLUSTER_STATUS" == "ACTIVE" ]]; then
   echo "Cluster $ECS_CLUSTER already ACTIVE"
 else
-  aws ecs create-cluster --cluster-name "$ECS_CLUSTER" --region "$AWS_REGION" >/dev/null
+  aws ecs create-cluster --cluster-name "$ECS_CLUSTER" --region "$AWS_REGION" \
+    --tags "key=Description,value=${REGLO_DEPLOYMENT_DESCRIPTION}" >/dev/null
   echo "Created cluster $ECS_CLUSTER"
 fi
+reglo_tag_ecs_cluster "$ECS_CLUSTER" "$AWS_REGION"
 
 # --- IAM roles ---
 echo ""
@@ -93,25 +97,27 @@ echo "==> IAM roles..."
 
 # Task execution role (ECR pull + CloudWatch logs)
 if ! aws iam get-role --role-name "$EXECUTION_ROLE_NAME" >/dev/null 2>&1; then
-  aws iam create-role --role-name "$EXECUTION_ROLE_NAME" \
-    --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ecs-tasks.amazonaws.com"},"Action":"sts:AssumeRole"}]}' \
+  reglo_create_iam_role "$EXECUTION_ROLE_NAME" \
+    '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ecs-tasks.amazonaws.com"},"Action":"sts:AssumeRole"}]}' \
     >/dev/null
   aws iam attach-role-policy --role-name "$EXECUTION_ROLE_NAME" \
     --policy-arn "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
   echo "Created execution role $EXECUTION_ROLE_NAME"
 else
   echo "Execution role $EXECUTION_ROLE_NAME already exists"
+  reglo_ensure_iam_role_description "$EXECUTION_ROLE_NAME"
 fi
 EXECUTION_ROLE_ARN="arn:aws:iam::${AWS_ACCOUNT}:role/${EXECUTION_ROLE_NAME}"
 
 # Task role (S3 + ECR + Lambda invoke via template)
 if ! aws iam get-role --role-name "$TASK_ROLE_NAME" >/dev/null 2>&1; then
-  aws iam create-role --role-name "$TASK_ROLE_NAME" \
-    --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ecs-tasks.amazonaws.com"},"Action":"sts:AssumeRole"}]}' \
+  reglo_create_iam_role "$TASK_ROLE_NAME" \
+    '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ecs-tasks.amazonaws.com"},"Action":"sts:AssumeRole"}]}' \
     >/dev/null
   echo "Created task role $TASK_ROLE_NAME"
 else
   echo "Task role $TASK_ROLE_NAME already exists"
+  reglo_ensure_iam_role_description "$TASK_ROLE_NAME"
 fi
 
 TASK_POLICY_FILE=$(mktemp)

@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from constants import REGLO_DEPLOYMENT_DESCRIPTION
 from lib import get_workspace_root
 from state_store import get_state_paths, read_json
 
@@ -108,6 +109,7 @@ def build_lambda_config(payload: dict[str, Any], extension: str) -> dict[str, An
         "Runtime": _LAMBDA_RUNTIME,
         "Timeout": _LAMBDA_TIMEOUT,
         "MemorySize": _LAMBDA_MEMORY_SIZE,
+        "Description": REGLO_DEPLOYMENT_DESCRIPTION,
         "Environment": {"Variables": build_runtime_environment(payload, for_lambda=True)},
     }
 

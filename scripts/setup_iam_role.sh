@@ -93,10 +93,7 @@ if aws iam get-policy --policy-arn "$POLICY_ARN" >/dev/null 2>&1; then
     --set-as-default >/dev/null
 else
   echo "Creating policy $POLICY_NAME..."
-  aws iam create-policy \
-    --policy-name "$POLICY_NAME" \
-    --policy-document "file://${EFFECTIVE_POLICY_FILE}" \
-    --description "IAM policy for ${EXTENSION_NAME} Handlers Lambda" >/dev/null
+  reglo_create_iam_policy "$POLICY_NAME" "$EFFECTIVE_POLICY_FILE" >/dev/null
 fi
 
 [[ -n "$GENERATED_POLICY_FILE" ]] && rm -f "$GENERATED_POLICY_FILE"
@@ -108,11 +105,9 @@ if aws iam get-role --role-name "$ROLE_NAME" >/dev/null 2>&1; then
   aws iam update-assume-role-policy --role-name "$ROLE_NAME" --policy-document "$TRUST_POLICY" >/dev/null
 else
   echo "Creating role $ROLE_NAME..."
-  aws iam create-role \
-    --role-name "$ROLE_NAME" \
-    --assume-role-policy-document "$TRUST_POLICY" \
-    --description "IAM role for ${EXTENSION_NAME} Handlers Lambda" >/dev/null
+  reglo_create_iam_role "$ROLE_NAME" "$TRUST_POLICY" >/dev/null
 fi
+reglo_ensure_iam_role_description "$ROLE_NAME"
 
 aws iam attach-role-policy --role-name "$ROLE_NAME" --policy-arn "$POLICY_ARN" 2>/dev/null || true
 aws iam attach-role-policy --role-name "$ROLE_NAME" \

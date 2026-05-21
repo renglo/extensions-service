@@ -93,11 +93,13 @@ if ! aws iam get-role --role-name "$ECS_INSTANCE_ROLE_NAME" >/dev/null 2>&1; the
   ]
 }
 JSON
-  aws iam create-role --role-name "$ECS_INSTANCE_ROLE_NAME" --assume-role-policy-document "file://$TRUST_DOC" >/dev/null
+  reglo_create_iam_role "$ECS_INSTANCE_ROLE_NAME" "file://$TRUST_DOC" >/dev/null
   rm -f "$TRUST_DOC"
   aws iam attach-role-policy --role-name "$ECS_INSTANCE_ROLE_NAME" --policy-arn "arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role" >/dev/null
   aws iam attach-role-policy --role-name "$ECS_INSTANCE_ROLE_NAME" --policy-arn "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore" >/dev/null
   echo "Created role $ECS_INSTANCE_ROLE_NAME"
+else
+  reglo_ensure_iam_role_description "$ECS_INSTANCE_ROLE_NAME"
 fi
 
 if ! aws iam get-instance-profile --instance-profile-name "$ECS_INSTANCE_PROFILE_NAME" >/dev/null 2>&1; then
@@ -134,7 +136,8 @@ cat > "$LT_DATA" <<JSON
       "Tags": [
         {"Key":"Name","Value":"$ECS_ASG_NAME"},
         {"Key":"Project","Value":"$EXTENSION_NAME"},
-        {"Key":"Service","Value":"handlers-ecs-ec2"}
+        {"Key":"Service","Value":"handlers-ecs-ec2"},
+        {"Key":"Description","Value":"$REGLO_DEPLOYMENT_DESCRIPTION"}
       ]
     }
   ]
@@ -176,7 +179,7 @@ else
     --desired-capacity "$ASG_DESIRED" \
     --max-size "$ASG_MAX" \
     --vpc-zone-identifier "$SUBNETS_CSV" \
-    --tags "Key=Name,Value=$ECS_ASG_NAME,PropagateAtLaunch=true" "Key=Project,Value=$EXTENSION_NAME,PropagateAtLaunch=true" "Key=Service,Value=handlers-ecs-ec2,PropagateAtLaunch=true" \
+    --tags "Key=Name,Value=$ECS_ASG_NAME,PropagateAtLaunch=true" "Key=Project,Value=$EXTENSION_NAME,PropagateAtLaunch=true" "Key=Service,Value=handlers-ecs-ec2,PropagateAtLaunch=true" "Key=Description,Value=${REGLO_DEPLOYMENT_DESCRIPTION},PropagateAtLaunch=true" \
     --region "$AWS_REGION" >/dev/null
   echo "Created ASG $ECS_ASG_NAME (min=$ASG_MIN desired=$ASG_DESIRED max=$ASG_MAX)"
 fi
@@ -207,8 +210,11 @@ else
     --auto-scaling-group-provider "autoScalingGroupArn=${ASG_ARN},managedScaling={status=ENABLED,targetCapacity=100,minimumScalingStepSize=1,maximumScalingStepSize=4},managedTerminationProtection=DISABLED" \
     --region "$AWS_REGION" >/dev/null
   echo "Created capacity provider $ECS_CP_NAME"
+  reglo_tag_ecs_capacity_provider "$ECS_CP_NAME" "$AWS_REGION"
   # Wait briefly for eventual consistency before associating
   sleep 3
+else
+  reglo_tag_ecs_capacity_provider "$ECS_CP_NAME" "$AWS_REGION"
 fi
 
 echo "==> Associate capacity provider to cluster..."
