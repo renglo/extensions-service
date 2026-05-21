@@ -19,7 +19,11 @@ Short deploy-flow diagram: [DEPLOY_FLOW.md].
 
 Run from the repo root. Replace `<extension>` and `<aws-profile>` with your values.
 
+**Provision stage:** Is recomendend to be excecuted from the main infra installer, using `bootstrap/install.py`; but it can be done in the main proyect folder (where you have `system/`). But you will not have a pre-made `deploy_input.json`. In both cases, the json must be manally copied into `extensions-service/state/<ext>`
+
 **Before stage 2:** place `deploy_input.json` at `dev/extensions-service/state/<extension>/deploy_input.json` (see [Stage 2 — deploy]). After bootstrap, copy it from `bootstrap/state/<extension>/deploy_input.json`.
+
+**github-repo:** Using this option will create an OIDC configuration for the specified GitHub repository. This can later be used to grant permission to a workflow.yml file in that repository to perform the Build and Deploy phases.
 
 ### Lambda only
 
@@ -30,6 +34,7 @@ Provisions handlers IAM + Lambda path only (no ECS cluster, ECR, or S3 results b
   ```bash
   python3 dev/extensions-service/run.py <extension> provision-infra apply \
     --profile <aws-profile>
+    --github-repo <org>/<handlers-repo> #Optional
   ```
 
 2. **Build** the Lambda zip (`extensions/<extension>/package/lambda_deployment.zip`)
@@ -55,6 +60,7 @@ Provisions handlers IAM plus ECS cluster, ECR, and S3 results bucket. Uses the d
   python3 dev/extensions-service/run.py <extension> provision-infra apply \
     --profile <aws-profile> \
     --launch-type <ec2|fargate>
+    --github-repo <org>/<handlers-repo> #Optional
   ```
 
 2. **Build** the Lambda zip and the ECS Docker image (heavy dependencies)
@@ -289,4 +295,41 @@ If `pip install` fails, the build retries with `--only-binary` for packages in `
 
 ```bash
 sed -i 's/\r$//' dev/extensions-service/scripts/*.sh
+```
+
+## Deploy flow chart
+
+```mermaid
+flowchart LR
+  subgraph provision_infra [1. provision-infra]
+    P[IAM and optional ECS capacity]
+    OIDC[optional GitHub OIDC roles]
+  end
+
+  subgraph deploy_block [2. deploy]
+    B[build zip / ECS image]
+    U[push ECS / Lambda]
+  end
+
+  subgraph runtime_block [3. runtime]
+    R[ECS profile + env export]
+  end
+
+  provision_infra --> deploy_block --> runtime_block
+
+  P -->|"writes state/"| StateProv[(provision_manifest.json)]
+  P -->|"writes state/"| RunProf[(runtime_profile.json)]
+  P -->|"writes state/"| LambdaExport[(lambda_env_export.json)]
+  OIDC -->|"writes state/"| OidcState[(handlers_github_oidc.json)]
+  B -->|"reads extensions/"| PyToml[(pyproject.toml)]
+  B -->|"reads dev/"| Renglo[(renglo-lib)]
+  B -->|"writes state/"| Release[(release_manifest.json)]
+  B -->|"writes extensions/"| Zip[(lambda_deployment.zip)]
+  U -->|"reads state/"| StateProv
+  U -->|"reads state/"| DeployIn[(deploy_input.json - created in bootstrap)]
+  U -->|"optional state/"| RunProf
+  U -->|"writes state/"| Release
+  R -->|"reads state/"| StateProv
+  R -->|"reads/writes state/"| RunProf
+  R -->|"writes state/"| LambdaExport
 ```
