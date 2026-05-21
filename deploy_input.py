@@ -18,6 +18,14 @@ RUNTIME_ENV_EXCLUDE: frozenset[str] = frozenset(
     }
 )
 
+# Lambda rejects these in Environment.Variables (reserved; set by the runtime).
+LAMBDA_RESERVED_ENV_KEYS: frozenset[str] = frozenset(
+    {
+        "AWS_REGION",
+        "AWS_DEFAULT_REGION",
+    }
+)
+
 _LAMBDA_HANDLER = "lambda_router.lambda_handler"
 _LAMBDA_RUNTIME = "python3.12"
 _LAMBDA_TIMEOUT = 900
@@ -71,12 +79,25 @@ def _string_vars(raw: dict[str, Any] | None) -> dict[str, str]:
     }
 
 
+def ensure_aws_region_pair(vars_map: dict[str, str]) -> None:
+    """Ensure AWS_REGION and AWS_DEFAULT_REGION are both set to the same value (ECS/SDK parity)."""
+    region = (vars_map.get("AWS_REGION") or vars_map.get("AWS_DEFAULT_REGION") or "").strip()
+    if not region:
+        return
+    vars_map["AWS_REGION"] = region
+    vars_map["AWS_DEFAULT_REGION"] = region
+
+
 def build_runtime_environment(
     payload: dict[str, Any],
     *,
     for_lambda: bool = False,
 ) -> dict[str, str]:
-    """Merge VARS + SECRETS into a flat env map for Lambda or ECS (excludes RUNTIME_ENV_EXCLUDE)."""
+    """Merge VARS + SECRETS into a flat env map for Lambda or ECS (excludes RUNTIME_ENV_EXCLUDE).
+
+    Lambda: drops reserved region keys (AWS sets them at runtime).
+    ECS: keeps both AWS_REGION and AWS_DEFAULT_REGION (duplicated when only one is present).
+    """
     validate_deploy_input_payload(payload)
     merged: dict[str, str] = {}
     merged.update(_string_vars(payload.get("VARS")))
@@ -85,7 +106,13 @@ def build_runtime_environment(
         if key not in RUNTIME_ENV_EXCLUDE:
             merged[key] = value
     if for_lambda:
-        return {"PYTHONPATH": "/var/task", **merged}
+        runtime = {
+            key: value
+            for key, value in merged.items()
+            if key not in LAMBDA_RESERVED_ENV_KEYS
+        }
+        return {"PYTHONPATH": "/var/task", **runtime}
+    ensure_aws_region_pair(merged)
     return merged
 
 
