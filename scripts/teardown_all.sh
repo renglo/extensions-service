@@ -13,11 +13,13 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_common.sh"
 #   ECR repository (all images)
 #   S3 results bucket (all objects, then bucket)
 #   IAM ECS roles (task + execution)
-#   IAM Lambda role + managed policy
+#   Handlers Lambda function ({ext}-handlers or LAMBDA_FUNCTION_NAME)
+#   IAM Lambda role + managed policy ({Ext}HandlersPolicy)
 #   CloudWatch log groups (ECS + optional Lambda), unless TEARDOWN_KEEP_LOGS=1
 #
 # Requires: EXTENSION_NAME, WORKSPACE_ROOT
 # Optional: AWS_REGION, AWS_PROFILE, ECS_CLUSTER, ECS_RESULTS_BUCKET
+#           LAMBDA_FUNCTION_NAME — handlers Lambda (default: {EXTENSION_NAME}-handlers)
 #           TEARDOWN_KEEP_LOGS=1 — skip deleting CloudWatch log groups
 #           LAMBDA_LOG_GROUP_NAME — e.g. /aws/lambda/my-fn (deleted when logs not kept)
 #           TEARDOWN_PYTHON — python with boto3 (auto-set by run.py provision-infra teardown)
@@ -40,9 +42,22 @@ ECR_REPO="${EXTENSION_NAME}-handlers-ecs"
 ECS_TASK_FAMILY="${EXTENSION_NAME}-handlers-ecs"
 EXECUTION_ROLE_NAME="${EXTENSION_NAME}-handlers-ecs-execution"
 TASK_ROLE_NAME="${EXTENSION_NAME}-handlers-ecs-task"
+LAMBDA_FUNCTION_NAME="${LAMBDA_FUNCTION_NAME:-${EXTENSION_NAME}-handlers}"
 LAMBDA_ROLE_NAME="${EXTENSION_NAME}-handlers-role"
 POLICY_NAME="$(echo "${EXTENSION_NAME:0:1}" | tr '[:lower:]' '[:upper:]')${EXTENSION_NAME:1}HandlersPolicy"
 POLICY_ARN="arn:aws:iam::${AWS_ACCOUNT}:policy/${POLICY_NAME}"
+
+# Detach all managed policies from a role (best-effort).
+_iam_detach_all_managed_policies() {
+  local role_name="$1"
+  local attached
+  attached=$(aws iam list-attached-role-policies --role-name "$role_name" \
+    --query 'AttachedPolicies[*].PolicyArn' --output text 2>/dev/null || true)
+  for parn in $attached; do
+    [[ -z "$parn" || "$parn" == "None" ]] && continue
+    aws iam detach-role-policy --role-name "$role_name" --policy-arn "$parn" >/dev/null 2>&1 || true
+  done
+}
 
 # Inline S3 cleanup uses boto3. TEARDOWN_PYTHON is set by provision_infra.cmd_teardown (run.py venv).
 _resolve_teardown_python() {
@@ -106,6 +121,7 @@ echo "Resources to remove:"
 echo "  ECS cluster:    $ECS_CLUSTER"
 echo "  ECR repo:       $ECR_REPO"
 echo "  S3 bucket:      $ECS_BUCKET"
+echo "  Lambda:         $LAMBDA_FUNCTION_NAME"
 echo "  IAM roles:      $LAMBDA_ROLE_NAME, $EXECUTION_ROLE_NAME, $TASK_ROLE_NAME"
 echo "  IAM policy:     $POLICY_NAME"
 if [[ "${TEARDOWN_KEEP_LOGS:-}" == "1" || "${TEARDOWN_KEEP_LOGS:-}" == "true" ]]; then
@@ -116,12 +132,12 @@ fi
 echo ""
 
 # ── Step 1: EC2 capacity (reuse existing script) ──────────────────────────────
-echo "==> [1/8] EC2 capacity (ASG, launch template, capacity provider, instance role)..."
+echo "==> [1/9] EC2 capacity (ASG, launch template, capacity provider, instance role)..."
 "$SCRIPT_DIR/undeploy_ecs_capacity.sh" || true
 echo ""
 
 # ── Step 2: ECS task definitions ─────────────────────────────────────────────
-echo "==> [2/8] ECS task definitions..."
+echo "==> [2/9] ECS task definitions..."
 TASK_DEF_ARNS=$(aws ecs list-task-definitions \
   --family-prefix "$ECS_TASK_FAMILY" \
   --region "$AWS_REGION" \
@@ -138,7 +154,7 @@ fi
 
 # ── Step 3: ECS cluster ───────────────────────────────────────────────────────
 echo ""
-echo "==> [3/8] ECS cluster..."
+echo "==> [3/9] ECS cluster..."
 CLUSTER_STATUS=$(aws ecs describe-clusters --clusters "$ECS_CLUSTER" --region "$AWS_REGION" \
   --query 'clusters[0].status' --output text 2>/dev/null || true)
 if [[ "$CLUSTER_STATUS" == "ACTIVE" ]]; then
@@ -149,7 +165,7 @@ fi
 
 # ── Step 4: ECR repository ────────────────────────────────────────────────────
 echo ""
-echo "==> [4/8] ECR repository..."
+echo "==> [4/9] ECR repository..."
 if aws ecr describe-repositories --repository-names "$ECR_REPO" --region "$AWS_REGION" >/dev/null 2>&1; then
   IMAGE_IDS=$(aws ecr list-images --repository-name "$ECR_REPO" --region "$AWS_REGION" \
     --query 'imageIds[]' --output json 2>/dev/null || echo "[]")
@@ -166,7 +182,7 @@ fi
 
 # ── Step 5: S3 bucket ─────────────────────────────────────────────────────────
 echo ""
-echo "==> [5/8] S3 bucket..."
+echo "==> [5/9] S3 bucket..."
 if aws s3api head-bucket --bucket "$ECS_BUCKET" 2>/dev/null; then
   aws s3 rm "s3://$ECS_BUCKET" --recursive --region "$AWS_REGION" 2>/dev/null || true
   "$TEARDOWN_PY" - <<PY
@@ -191,11 +207,10 @@ fi
 
 # ── Step 6: IAM ECS roles ─────────────────────────────────────────────────────
 echo ""
-echo "==> [6/8] IAM ECS roles..."
+echo "==> [6/9] IAM ECS roles..."
 
 if aws iam get-role --role-name "$EXECUTION_ROLE_NAME" >/dev/null 2>&1; then
-  aws iam detach-role-policy --role-name "$EXECUTION_ROLE_NAME" \
-    --policy-arn "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy" >/dev/null 2>&1 || true
+  _iam_detach_all_managed_policies "$EXECUTION_ROLE_NAME"
   aws iam delete-role --role-name "$EXECUTION_ROLE_NAME" >/dev/null
   echo "  Deleted role $EXECUTION_ROLE_NAME"
 else
@@ -205,24 +220,29 @@ fi
 if aws iam get-role --role-name "$TASK_ROLE_NAME" >/dev/null 2>&1; then
   aws iam delete-role-policy --role-name "$TASK_ROLE_NAME" \
     --policy-name "ecs-handlers-s3-ecr" >/dev/null 2>&1 || true
-  aws iam detach-role-policy --role-name "$TASK_ROLE_NAME" \
-    --policy-arn "$POLICY_ARN" >/dev/null 2>&1 || true
+  _iam_detach_all_managed_policies "$TASK_ROLE_NAME"
   aws iam delete-role --role-name "$TASK_ROLE_NAME" >/dev/null
   echo "  Deleted role $TASK_ROLE_NAME"
 else
   echo "  Role $TASK_ROLE_NAME not found."
 fi
 
-# ── Step 7: Lambda role + managed policy ─────────────────────────────────────
+# ── Step 7: Handlers Lambda function (must run before IAM role delete) ───────
 echo ""
-echo "==> [7/8] Lambda role and managed policy..."
+echo "==> [7/9] Handlers Lambda function..."
+if aws lambda get-function --function-name "$LAMBDA_FUNCTION_NAME" --region "$AWS_REGION" >/dev/null 2>&1; then
+  aws lambda delete-function --function-name "$LAMBDA_FUNCTION_NAME" --region "$AWS_REGION" >/dev/null
+  echo "  Deleted Lambda $LAMBDA_FUNCTION_NAME"
+else
+  echo "  Lambda $LAMBDA_FUNCTION_NAME not found."
+fi
+
+# ── Step 8: Lambda role + managed policy ─────────────────────────────────────
+echo ""
+echo "==> [8/9] Lambda role and managed policy..."
 
 if aws iam get-role --role-name "$LAMBDA_ROLE_NAME" >/dev/null 2>&1; then
-  ATTACHED=$(aws iam list-attached-role-policies --role-name "$LAMBDA_ROLE_NAME" \
-    --query 'AttachedPolicies[*].PolicyArn' --output text 2>/dev/null || true)
-  for parn in $ATTACHED; do
-    aws iam detach-role-policy --role-name "$LAMBDA_ROLE_NAME" --policy-arn "$parn" >/dev/null 2>&1 || true
-  done
+  _iam_detach_all_managed_policies "$LAMBDA_ROLE_NAME"
   aws iam delete-role --role-name "$LAMBDA_ROLE_NAME" >/dev/null
   echo "  Deleted role $LAMBDA_ROLE_NAME"
 else
@@ -241,9 +261,9 @@ else
   echo "  Policy $POLICY_NAME not found."
 fi
 
-# ── Step 8: CloudWatch Logs (optional retention via TEARDOWN_KEEP_LOGS) ───────
+# ── Step 9: CloudWatch Logs (optional retention via TEARDOWN_KEEP_LOGS) ───────
 echo ""
-echo "==> [8/8] CloudWatch Logs..."
+echo "==> [9/9] CloudWatch Logs..."
 ECS_LOG_GROUP="/ecs/${ECS_TASK_FAMILY}"
 if [[ "${TEARDOWN_KEEP_LOGS:-}" == "1" || "${TEARDOWN_KEEP_LOGS:-}" == "true" ]]; then
   echo "  Skipped (TEARDOWN_KEEP_LOGS). Preserved: $ECS_LOG_GROUP"

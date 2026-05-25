@@ -29,6 +29,8 @@ ECS_TASK_FAMILY="${ECS_TASK_DEFINITION:-${EXTENSION_NAME}-handlers-ecs}"
 ECR_REPO="${EXTENSION_NAME}-handlers-ecs"
 EXECUTION_ROLE_NAME="${EXTENSION_NAME}-handlers-ecs-execution"
 TASK_ROLE_NAME="${EXTENSION_NAME}-handlers-ecs-task"
+TT_POLICY_NAME="${EXTENSION_NAME}_tt_policy"
+TT_POLICY_ARN="arn:aws:iam::${AWS_ACCOUNT}:policy/${TT_POLICY_NAME}"
 
 echo "=========================================="
 echo "ECS Deployment: $EXTENSION_NAME"
@@ -152,6 +154,15 @@ if aws iam get-policy --policy-arn "$HANDLERS_POLICY_ARN" >/dev/null 2>&1; then
 else
   echo "WARNING: Policy $HANDLERS_POLICY_NAME not found. ECS task will only have ECS bucket + ECR access." >&2
   echo "         Run: python3 run.py $EXTENSION_NAME setup-iam" >&2
+fi
+
+# Attach the platform runtime policy so ECS handler code can access DynamoDB, S3, Cognito, SES, etc.
+if aws iam get-policy --policy-arn "$TT_POLICY_ARN" >/dev/null 2>&1; then
+  aws iam attach-role-policy --role-name "$TASK_ROLE_NAME" --policy-arn "$TT_POLICY_ARN" 2>/dev/null || true
+  echo "Attached $TT_POLICY_NAME to $TASK_ROLE_NAME"
+else
+  echo "WARNING: Platform policy $TT_POLICY_NAME not found — ECS handler code will lack DynamoDB/S3/Cognito/SES access." >&2
+  echo "         Run launcher deploy_environment.py first to create it." >&2
 fi
 
 echo "==> Task definition..."

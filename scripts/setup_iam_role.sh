@@ -12,6 +12,9 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_common.sh"
 # Policy document is always generated from the extension name and AWS account
 # (ECS invoke + S3 handshake). No per-extension IAM policy JSON file is used.
 #
+# Also attaches {ext}_tt_policy to the Lambda handlers role so the handler code
+# can access DynamoDB, S3, Cognito, SES, EventBridge, WebSocket, etc.
+#
 # Requires: EXTENSION_NAME, WORKSPACE_ROOT
 # Optional: AWS_REGION, AWS_PROFILE
 
@@ -23,6 +26,7 @@ fi
 WORKSPACE_ROOT="$(cd "$WORKSPACE_ROOT" && pwd)"
 POLICY_NAME="$(echo "${EXTENSION_NAME:0:1}" | tr '[:lower:]' '[:upper:]')${EXTENSION_NAME:1}HandlersPolicy"
 ROLE_NAME="${EXTENSION_NAME}-handlers-role"
+TT_POLICY_NAME="${EXTENSION_NAME}_tt_policy"
 AWS_REGION="${AWS_REGION:-us-east-1}"
 
 command -v aws >/dev/null 2>&1 || { echo "ERROR: AWS CLI not found" >&2; exit 1; }
@@ -30,6 +34,7 @@ aws sts get-caller-identity >/dev/null 2>&1 || { echo "ERROR: AWS credentials no
 
 AWS_ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
 POLICY_ARN="arn:aws:iam::${AWS_ACCOUNT}:policy/${POLICY_NAME}"
+TT_POLICY_ARN="arn:aws:iam::${AWS_ACCOUNT}:policy/${TT_POLICY_NAME}"
 
 echo "=========================================="
 echo "IAM Role Setup: $EXTENSION_NAME"
@@ -112,6 +117,15 @@ reglo_ensure_iam_role_description "$ROLE_NAME"
 aws iam attach-role-policy --role-name "$ROLE_NAME" --policy-arn "$POLICY_ARN" 2>/dev/null || true
 aws iam attach-role-policy --role-name "$ROLE_NAME" \
   --policy-arn "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole" 2>/dev/null || true
+
+# Attach the platform runtime policy so handler code can access DynamoDB, S3, Cognito, SES, etc.
+if aws iam get-policy --policy-arn "$TT_POLICY_ARN" >/dev/null 2>&1; then
+  aws iam attach-role-policy --role-name "$ROLE_NAME" --policy-arn "$TT_POLICY_ARN" 2>/dev/null || true
+  echo "Attached $TT_POLICY_NAME to $ROLE_NAME"
+else
+  echo "WARNING: Platform policy $TT_POLICY_NAME not found — handler code will lack DynamoDB/S3/Cognito/SES access." >&2
+  echo "         Run launcher deploy_environment.py first to create it." >&2
+fi
 
 echo ""
 echo "Done. Role ARN: arn:aws:iam::${AWS_ACCOUNT}:role/${ROLE_NAME}"

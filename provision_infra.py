@@ -361,8 +361,8 @@ def cmd_teardown(extension: str, args: list[str]) -> int:
     """DESTRUCTIVE: Remove ALL AWS resources created by provision-infra apply.
 
     Deletes (in order): EC2 capacity, ECS task definitions, ECS cluster, ECR repo,
-    S3 bucket, ECS IAM roles, Lambda IAM role and managed policy, CloudWatch log groups
-    (unless --keep-logs).
+    S3 bucket, ECS IAM roles, handlers Lambda function, Lambda IAM role and managed
+    policy, CloudWatch log groups (unless --keep-logs).
 
     Requires --yes to confirm (prevents accidental runs).
     """
@@ -404,10 +404,17 @@ def cmd_teardown(extension: str, args: list[str]) -> int:
     if parsed.keep_logs:
         env["TEARDOWN_KEEP_LOGS"] = "1"
 
+    from lib import resolve_handlers_function_name
+
+    lambda_block = manifest.get("lambda") or {}
+    function_name = str(
+        lambda_block.get("function_name")
+        or resolve_handlers_function_name(extension, root)
+    )
+    env["LAMBDA_FUNCTION_NAME"] = function_name
+
     # Lambda log group name (before state dir is removed) — optional second CW group to delete
-    lc = load_lambda_config_from_deploy_input(extension, root)
-    if lc and lc.get("FunctionName"):
-        env["LAMBDA_LOG_GROUP_NAME"] = f"/aws/lambda/{lc['FunctionName']}"
+    env["LAMBDA_LOG_GROUP_NAME"] = f"/aws/lambda/{function_name}"
 
     from bootstrap_handlers_github_oidc import teardown_handlers_github_oidc
 

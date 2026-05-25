@@ -204,6 +204,7 @@ CP_STATUS="$(aws ecs describe-capacity-providers \
 
 if [[ "$CP_STATUS" == "ACTIVE" ]]; then
   echo "Capacity provider $ECS_CP_NAME already ACTIVE"
+  reglo_tag_ecs_capacity_provider "$ECS_CP_NAME" "$AWS_REGION"
 else
   aws ecs create-capacity-provider \
     --name "$ECS_CP_NAME" \
@@ -211,10 +212,7 @@ else
     --region "$AWS_REGION" >/dev/null
   echo "Created capacity provider $ECS_CP_NAME"
   reglo_tag_ecs_capacity_provider "$ECS_CP_NAME" "$AWS_REGION"
-  # Wait briefly for eventual consistency before associating
   sleep 3
-else
-  reglo_tag_ecs_capacity_provider "$ECS_CP_NAME" "$AWS_REGION"
 fi
 
 echo "==> Associate capacity provider to cluster..."
