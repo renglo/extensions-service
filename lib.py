@@ -4,6 +4,7 @@ Extensions are identified by extensions/<name>/package (handler code).
 Deploy configuration lives in this package under state/<name>/deploy_input.json.
 """
 import os
+import tomllib
 from pathlib import Path
 
 
@@ -123,6 +124,80 @@ def get_package_dir(extension: str, workspace_root: Path | None = None) -> Path:
     """Return extensions/<extension>/package directory."""
     root = workspace_root or get_workspace_root()
     return root / "extensions" / extension / "package"
+
+
+def get_env_state_dir(env: str, workspace_root: Path | None = None) -> Path:
+    """Per-env state directory: extensions-service/state/<env>/ (build artifacts + manifests)."""
+    from state_store import get_state_paths
+
+    return get_state_paths(env, workspace_root).state_dir
+
+
+def get_lambda_deployment_zip_path(env: str, workspace_root: Path | None = None) -> Path:
+    """Lambda zip artifact path written by build and consumed by deploy."""
+    from state_store import get_state_paths
+
+    return get_state_paths(env, workspace_root).lambda_deployment_zip
+
+
+def resolve_extension_repo_dir(repo: str, workspace_root: Path | None = None) -> tuple[Path, str]:
+    """
+    Locate handler source package/ for an extension repo folder name.
+    Returns (absolute package dir, docker COPY path relative to workspace root).
+    """
+    root = workspace_root or get_workspace_root()
+    name = (repo or "").strip()
+    if not name:
+        raise ValueError("Extension repo name must not be empty")
+    candidates = [
+        (root / name / "package", f"{name}/package"),
+        (root / "extensions" / name / "package", f"extensions/{name}/package"),
+    ]
+    for pkg_dir, rel_copy in candidates:
+        if pkg_dir.is_dir():
+            return pkg_dir, rel_copy
+    tried = ", ".join(str(p) for p, _ in candidates)
+    raise FileNotFoundError(f"Extension repo package not found for {name!r}. Tried: {tried}")
+
+
+def detect_python_package(package_dir: Path) -> str:
+    """Top-level Python package folder name inside package/ (from pyproject or first subdir)."""
+    pyproject = package_dir / "pyproject.toml"
+    if pyproject.is_file():
+        try:
+            with open(pyproject, "rb") as f:
+                data = tomllib.load(f)
+            packages = (data.get("tool") or {}).get("setuptools", {}).get("packages") or []
+            if packages and isinstance(packages[0], str):
+                return packages[0].split(".")[0]
+        except (tomllib.TOMLDecodeError, OSError, IndexError, AttributeError):
+            pass
+    skip_dirs = {"__pycache__", ".lambda_build"}
+    for path in sorted(package_dir.iterdir()):
+        if path.is_dir() and path.name not in skip_dirs and not path.name.startswith("."):
+            return path.name
+    raise ValueError(f"Could not detect Python package directory under {package_dir}")
+
+
+def parse_extension_repo_flag(args: list[str]) -> tuple[list[str], str | None]:
+    """Extract --extension-repo FOLDER from build args. Returns (remaining_args, folder or None)."""
+    out: list[str] = []
+    extension_repo: str | None = None
+    i = 0
+    while i < len(args):
+        if args[i] == "--extension-repo":
+            if i + 1 >= len(args):
+                raise ValueError("--extension-repo requires a folder name")
+            extension_repo = args[i + 1].strip()
+            i += 2
+            continue
+        if args[i].startswith("--extension-repo="):
+            extension_repo = args[i].split("=", 1)[1].strip()
+            i += 1
+            continue
+        out.append(args[i])
+        i += 1
+    return out, extension_repo
 
 
 def get_extra_extensions(primary_extension: str, workspace_root: Path | None = None) -> list[str]:

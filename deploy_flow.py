@@ -3,14 +3,26 @@ from __future__ import annotations
 import argparse
 import os
 import subprocess
+import sys
 
 from deploy_input import (
     get_ecr_image_uri_from_deploy_input,
     get_runtime_env_from_deploy_input,
     resolve_deploy_input_file,
 )
-from lib import get_workspace_root, get_script_dir, merge_script_env, validate_extension
-from state_store import STATE_VERSION, default_release_manifest, get_state_paths, read_json, utc_now_iso, write_json
+from lib import (
+    detect_python_package,
+    get_env_state_dir,
+    get_lambda_deployment_zip_path,
+    get_workspace_root,
+    get_script_dir,
+    merge_script_env,
+    parse_extension_repo_flag,
+    resolve_extension_repo_dir,
+    validate_extension,
+    validate_extension_name,
+)
+from state_store import STATE_VERSION, default_release_manifest, ensure_state_dir, get_state_paths, read_json, utc_now_iso, write_json
 
 
 def _run_script(script_name: str, env: dict[str, str], extra_args: list[str] | None = None) -> int:
@@ -29,14 +41,50 @@ def _load_release_manifest(extension: str):
     return paths, data
 
 
-def _build_single(extension: str, root, large: bool, local: bool) -> int:
-    """Run one build pass and update the release manifest. Returns the script exit code."""
-    env = {
-        "EXTENSION_NAME": extension,
+def _build_env_for_single(
+    env_name: str,
+    root,
+    *,
+    extension_repo: str | None,
+    large: bool,
+    local: bool,
+) -> dict[str, str]:
+    validate_extension_name(env_name)
+    repo_name = (extension_repo or env_name).strip()
+    package_dir, docker_copy_path = resolve_extension_repo_dir(repo_name, root)
+    python_package = detect_python_package(package_dir)
+    state_dir = get_env_state_dir(env_name, root)
+    ensure_state_dir(get_state_paths(env_name, root))
+    deployment_zip = get_lambda_deployment_zip_path(env_name, root)
+    if extension_repo and extension_repo.strip() != env_name:
+        print(f"Build source: {package_dir} (repo {repo_name!r}, env {env_name!r})")
+        print(f"Python package: {python_package}")
+    print(f"Output zip: {deployment_zip}")
+    return {
+        "EXTENSION_NAME": env_name,
+        "EXTENSION_REPO": repo_name,
+        "DOCKER_SOURCE_COPY_PATH": docker_copy_path,
+        "PYTHON_PACKAGE": python_package,
+        "OUTPUT_STATE_DIR": str(state_dir),
+        "DEPLOYMENT_ZIP": str(deployment_zip),
         "WORKSPACE_ROOT": str(root),
         "EXTENSION_SERVICE_NATIVE_PLATFORM": "1" if local else "0",
         "EXTENSION_SERVICE_LARGE_BUILD": "1" if large else "0",
     }
+
+
+def _build_single(
+    extension: str,
+    root,
+    large: bool,
+    local: bool,
+    *,
+    extension_repo: str | None = None,
+) -> int:
+    """Run one build pass and update the release manifest. Returns the script exit code."""
+    env = _build_env_for_single(
+        extension, root, extension_repo=extension_repo, large=large, local=local
+    )
     rc = _run_script("build_lambda_package.sh", env=env)
     if rc != 0:
         return rc
@@ -55,7 +103,11 @@ def _build_single(extension: str, root, large: bool, local: bool) -> int:
         "created_at": utc_now_iso(),
     }
     # Keep last_build pointing to the most recently completed build
-    manifest["last_build"] = {**manifest["builds"][mode], "mode": mode}
+    manifest["last_build"] = {
+        **manifest["builds"][mode],
+        "mode": mode,
+        "lambda_deployment_zip": str(get_lambda_deployment_zip_path(extension, root)),
+    }
     write_json(paths.release_manifest, manifest)
     print(f"Release manifest updated ({mode}): {paths.release_manifest}")
     return 0
@@ -81,30 +133,43 @@ def cmd_build(extension: str, args: list[str]) -> int:
       - --large is passed explicitly (useful before provision-infra has run).
 
     Flags:
-      --large     Force ECS image build in addition to Lambda zip.
-      --local     Build Lambda as ARM64 (for run-local). ECS image is always amd64.
-      --no-ecs    Skip ECS image build even when provision_manifest says ECS is provisioned.
+      --extension-repo  Folder with package/ when source differs from <env> (e.g. arbitiumlab).
+      --large           Force ECS image build in addition to Lambda zip.
+      --local           Build Lambda as ARM64 (for run-local). ECS image is always amd64.
+      --no-ecs          Skip ECS image build even when provision_manifest says ECS is provisioned.
     """
     root = get_workspace_root()
-    validate_extension(extension, root)
+    try:
+        filtered_args, extension_repo = parse_extension_repo_flag(args)
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
 
-    force_large = "--large" in args
-    skip_ecs = "--no-ecs" in args
-    build_local = "--local" in args
+    try:
+        force_large = "--large" in filtered_args
+        skip_ecs = "--no-ecs" in filtered_args
+        build_local = "--local" in filtered_args
 
-    # Lambda zip is always the first artifact
-    print("==> Building Lambda zip...")
-    rc = _build_single(extension, root, large=False, local=build_local)
-    if rc != 0:
-        return rc
+        # Lambda zip is always the first artifact
+        print("==> Building Lambda zip...")
+        rc = _build_single(
+            extension, root, large=False, local=build_local, extension_repo=extension_repo
+        )
+        if rc != 0:
+            return rc
 
-    # ECS image: explicit flag OR auto-detected from provision_manifest / deploy_input
-    if not skip_ecs and (force_large or _ecs_is_provisioned(extension)):
-        source = "--large flag" if force_large else "deploy_input / provision_manifest"
-        print(f"==> Building ECS image (detected from {source})...")
-        return _build_single(extension, root, large=True, local=False)
+        # ECS image: explicit flag OR auto-detected from provision_manifest / deploy_input
+        if not skip_ecs and (force_large or _ecs_is_provisioned(extension)):
+            source = "--large flag" if force_large else "deploy_input / provision_manifest"
+            print(f"==> Building ECS image (detected from {source})...")
+            return _build_single(
+                extension, root, large=True, local=False, extension_repo=extension_repo
+            )
 
-    return 0
+        return 0
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
 
 
 def cmd_push(extension: str, args: list[str]) -> int:

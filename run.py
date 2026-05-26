@@ -20,6 +20,7 @@ from lib import (
     get_script_dir,
     get_workspace_root,
     get_function_name,
+    get_lambda_deployment_zip_path,
     get_package_dir,
     get_ecs_handlers_for_extension,
     get_extra_extensions,
@@ -88,8 +89,11 @@ def cmd_list(_args: list[str]) -> int:
 
 
 def cmd_build(extension: str, args: list[str]) -> int:
-    validate_extension(extension)
-    return deploy_build(extension, args)
+    try:
+        return deploy_build(extension, args)
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
 
 
 def _parse_deploy_type(args: list[str]) -> tuple[str, list[str]]:
@@ -111,12 +115,15 @@ def _parse_deploy_type(args: list[str]) -> tuple[str, list[str]]:
 
 
 def cmd_deploy(extension: str, args: list[str]) -> int:
-    validate_extension(extension)
+    validate_extension_name(extension)
     profile, rest = _parse_profile_and_filter_args(args)
     deploy_type, filtered_args = _parse_deploy_type(rest)
+    root = get_workspace_root()
+    deployment_zip = get_lambda_deployment_zip_path(extension, root)
     env = {
         "EXTENSION_NAME": extension,
-        "WORKSPACE_ROOT": str(get_workspace_root()),
+        "WORKSPACE_ROOT": str(root),
+        "DEPLOYMENT_ZIP": str(deployment_zip),
     }
     if profile is not None:
         env["AWS_PROFILE"] = profile
@@ -316,7 +323,8 @@ def main() -> int:
         print("    build          Build artifacts. Lambda zip is always built.", file=sys.stderr)
         print("                   ECS image is also built automatically if provision_manifest.json", file=sys.stderr)
         print("                   shows ECS is provisioned. Flags: --large (force ECS build),", file=sys.stderr)
-        print("                   --no-ecs (skip ECS even if provisioned), --local (ARM64 Lambda).", file=sys.stderr)
+        print("                   --no-ecs (skip ECS even if provisioned), --local (ARM64 Lambda),", file=sys.stderr)
+        print("                   --extension-repo FOLDER (handler source when != env name).", file=sys.stderr)
         print("    push           Push image to ECR and register task definition. --profile NAME", file=sys.stderr)
         print("    publish        Record publish event in release_manifest.", file=sys.stderr)
         print("", file=sys.stderr)
@@ -325,7 +333,8 @@ def main() -> int:
         print("                   --network-mode, --task-cpu, --task-memory, --ec2-instance-type, --asg-* flags", file=sys.stderr)
         print("    export-lambda-env  Write state/<ext>/lambda_env_export.json (same as provision-infra export).", file=sys.stderr)
         print("", file=sys.stderr)
-        print("  build       Shortcut for 'deploy build'.", file=sys.stderr)
+        print("  build       Shortcut for 'deploy build'. Flags: --extension-repo FOLDER,", file=sys.stderr)
+        print("              --large, --no-ecs, --local (see deploy build).", file=sys.stderr)
         print("  setup-iam   Create/update Lambda IAM policy and role. --profile NAME", file=sys.stderr)
         print("  ecs-profile Shortcut for 'runtime set-profile'.", file=sys.stderr)
         print("  provision-ecs-capacity  Create/update EC2 ASG + capacity provider for ECS.", file=sys.stderr)

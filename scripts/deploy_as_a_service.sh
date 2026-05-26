@@ -14,9 +14,17 @@ fi
 WORKSPACE_ROOT="$(cd "$WORKSPACE_ROOT" && pwd)"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SERVICE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-PACKAGE_DIR="$WORKSPACE_ROOT/extensions/$EXTENSION_NAME/package"
 BUILD_SCRIPT="$SCRIPT_DIR/build_lambda_package.sh"
-DEPLOYMENT_ZIP="$PACKAGE_DIR/lambda_deployment.zip"
+if [[ -n "${DEPLOYMENT_ZIP:-}" ]]; then
+  DEPLOYMENT_ZIP="$(cd "$(dirname "$DEPLOYMENT_ZIP")" && pwd)/$(basename "$DEPLOYMENT_ZIP")"
+else
+  DEPLOYMENT_ZIP=$(python3 -c "
+import sys
+sys.path.insert(0, '${SERVICE_ROOT}')
+from state_store import get_state_paths
+print(get_state_paths('${EXTENSION_NAME}').lambda_deployment_zip)
+")
+fi
 GENERATED_LAMBDA_CONFIG=""
 
 if [[ -n "${DEPLOY_INPUT_FILE:-}" && -f "${DEPLOY_INPUT_FILE}" ]]; then
@@ -78,7 +86,10 @@ fi
 
 if [[ ! -f "$DEPLOYMENT_ZIP" ]]; then
   echo "==> Building package..."
-  EXTENSION_NAME="$EXTENSION_NAME" WORKSPACE_ROOT="$WORKSPACE_ROOT" "$BUILD_SCRIPT" || exit 1
+  OUTPUT_STATE_DIR="$(dirname "$DEPLOYMENT_ZIP")"
+  EXTENSION_NAME="$EXTENSION_NAME" WORKSPACE_ROOT="$WORKSPACE_ROOT" \
+    OUTPUT_STATE_DIR="$OUTPUT_STATE_DIR" DEPLOYMENT_ZIP="$DEPLOYMENT_ZIP" \
+    "$BUILD_SCRIPT" || exit 1
 fi
 
 AWS_REGION="${AWS_REGION:-us-east-1}"

@@ -36,6 +36,7 @@ class ExtensionStatePaths:
     lambda_env_export: Path
     deploy_input: Path
     handlers_github_oidc: Path
+    lambda_deployment_zip: Path
 
 
 def get_state_paths(extension: str, workspace_root: Path | None = None) -> ExtensionStatePaths:
@@ -51,6 +52,7 @@ def get_state_paths(extension: str, workspace_root: Path | None = None) -> Exten
         lambda_env_export=state_dir / "lambda_env_export.json",
         deploy_input=state_dir / "deploy_input.json",
         handlers_github_oidc=state_dir / "handlers_github_oidc.json",
+        lambda_deployment_zip=state_dir / "lambda_deployment.zip",
     )
 
 
