@@ -200,45 +200,25 @@ def parse_extension_repo_flag(args: list[str]) -> tuple[list[str], str | None]:
     return out, extension_repo
 
 
-def get_extra_extensions(primary_extension: str, workspace_root: Path | None = None) -> list[str]:
-    """
-    Parse EXTERNAL_HANDLERS from env or system/env_config.py.
-    Format: comma-separated extension names, e.g. "extension-1,extension-2".
-    Returns the extra extensions to bundle alongside the primary one (primary excluded).
-    Only extensions that have a package directory are included.
-    """
-    import os
-    raw = os.environ.get("EXTERNAL_HANDLERS", "")
-    if not raw:
-        root = workspace_root or get_workspace_root()
-        env_config = root / "system" / "env_config.py"
-        if env_config.is_file():
-            try:
-                with open(env_config) as f:
-                    for line in f:
-                        stripped = line.strip()
-                        # Match exactly EXTERNAL_HANDLERS (not EXTERNAL_HANDLERS_ECS_HANDLERS etc.)
-                        if stripped.startswith("EXTERNAL_HANDLERS") and "=" in stripped:
-                            key = stripped.split("=", 1)[0].strip()
-                            if key == "EXTERNAL_HANDLERS":
-                                raw = stripped.split("=", 1)[1].strip().strip("'\"").strip()
-                                break
-            except Exception:
-                pass
-    if not raw:
-        return []
-    root = workspace_root or get_workspace_root()
-    result = []
-    for e in raw.split(","):
-        e = e.strip()
-        if not e or e.lower() == primary_extension.lower():
+def parse_extra_extensions_flag(args: list[str]) -> tuple[list[str], list[str]]:
+    """Extract --extra-extensions a,b,c from build args. Returns (remaining_args, list_of_names)."""
+    out: list[str] = []
+    extras: list[str] = []
+    i = 0
+    while i < len(args):
+        if args[i] == "--extra-extensions":
+            if i + 1 >= len(args):
+                raise ValueError("--extra-extensions requires a comma-separated list")
+            extras = [e.strip() for e in args[i + 1].split(",") if e.strip()]
+            i += 2
             continue
-        pkg_dir = root / "extensions" / e / "package"
-        if not pkg_dir.is_dir():
-            print(f"WARNING: EXTERNAL_HANDLERS includes '{e}' but extensions/{e}/package not found — skipping.")
+        if args[i].startswith("--extra-extensions="):
+            extras = [e.strip() for e in args[i].split("=", 1)[1].split(",") if e.strip()]
+            i += 1
             continue
-        result.append(e)
-    return result
+        out.append(args[i])
+        i += 1
+    return out, extras
 
 
 def get_ecs_handlers_for_extension(extension: str, workspace_root: Path | None = None) -> list[str]:

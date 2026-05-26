@@ -23,7 +23,6 @@ from lib import (
     get_lambda_deployment_zip_path,
     get_package_dir,
     get_ecs_handlers_for_extension,
-    get_extra_extensions,
     list_extensions,
     merge_script_env,
     validate_extension,

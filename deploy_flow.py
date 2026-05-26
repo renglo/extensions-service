@@ -18,6 +18,7 @@ from lib import (
     get_script_dir,
     merge_script_env,
     parse_extension_repo_flag,
+    parse_extra_extensions_flag,
     resolve_extension_repo_dir,
     validate_extension,
     validate_extension_name,
@@ -48,6 +49,7 @@ def _build_env_for_single(
     extension_repo: str | None,
     large: bool,
     local: bool,
+    extra_extensions: list[str] | None = None,
 ) -> dict[str, str]:
     validate_extension_name(env_name)
     repo_name = (extension_repo or env_name).strip()
@@ -60,7 +62,7 @@ def _build_env_for_single(
         print(f"Build source: {package_dir} (repo {repo_name!r}, env {env_name!r})")
         print(f"Python package: {python_package}")
     print(f"Output zip: {deployment_zip}")
-    return {
+    env = {
         "EXTENSION_NAME": env_name,
         "EXTENSION_REPO": repo_name,
         "DOCKER_SOURCE_COPY_PATH": docker_copy_path,
@@ -71,6 +73,9 @@ def _build_env_for_single(
         "EXTENSION_SERVICE_NATIVE_PLATFORM": "1" if local else "0",
         "EXTENSION_SERVICE_LARGE_BUILD": "1" if large else "0",
     }
+    if extra_extensions:
+        env["EXTRA_EXTENSIONS"] = ",".join(extra_extensions)
+    return env
 
 
 def _build_single(
@@ -80,10 +85,14 @@ def _build_single(
     local: bool,
     *,
     extension_repo: str | None = None,
+    extra_extensions: list[str] | None = None,
 ) -> int:
     """Run one build pass and update the release manifest. Returns the script exit code."""
     env = _build_env_for_single(
-        extension, root, extension_repo=extension_repo, large=large, local=local
+        extension, root,
+        extension_repo=extension_repo,
+        large=large, local=local,
+        extra_extensions=extra_extensions,
     )
     rc = _run_script("build_lambda_package.sh", env=env)
     if rc != 0:
@@ -133,14 +142,16 @@ def cmd_build(extension: str, args: list[str]) -> int:
       - --large is passed explicitly (useful before provision-infra has run).
 
     Flags:
-      --extension-repo  Folder with package/ when source differs from <env> (e.g. arbitiumlab).
-      --large           Force ECS image build in addition to Lambda zip.
-      --local           Build Lambda as ARM64 (for run-local). ECS image is always amd64.
-      --no-ecs          Skip ECS image build even when provision_manifest says ECS is provisioned.
+      --extension-repo    Folder with package/ when source differs from <env> (e.g. arbitiumrs).
+      --extra-extensions  Comma-separated extra extensions to bundle (e.g. pes,schd).
+      --large             Force ECS image build in addition to Lambda zip.
+      --local             Build Lambda as ARM64 (for run-local). ECS image is always amd64.
+      --no-ecs            Skip ECS image build even when provision_manifest says ECS is provisioned.
     """
     root = get_workspace_root()
     try:
         filtered_args, extension_repo = parse_extension_repo_flag(args)
+        filtered_args, extra_extensions = parse_extra_extensions_flag(filtered_args)
     except ValueError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
@@ -150,10 +161,15 @@ def cmd_build(extension: str, args: list[str]) -> int:
         skip_ecs = "--no-ecs" in filtered_args
         build_local = "--local" in filtered_args
 
+        if extra_extensions:
+            print(f"  Extra extensions to bundle: {', '.join(extra_extensions)}")
+
         # Lambda zip is always the first artifact
         print("==> Building Lambda zip...")
         rc = _build_single(
-            extension, root, large=False, local=build_local, extension_repo=extension_repo
+            extension, root, large=False, local=build_local,
+            extension_repo=extension_repo,
+            extra_extensions=extra_extensions or None,
         )
         if rc != 0:
             return rc
@@ -163,7 +179,9 @@ def cmd_build(extension: str, args: list[str]) -> int:
             source = "--large flag" if force_large else "deploy_input / provision_manifest"
             print(f"==> Building ECS image (detected from {source})...")
             return _build_single(
-                extension, root, large=True, local=False, extension_repo=extension_repo
+                extension, root, large=True, local=False,
+                extension_repo=extension_repo,
+                extra_extensions=extra_extensions or None,
             )
 
         return 0

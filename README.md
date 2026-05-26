@@ -71,7 +71,8 @@ Provisions handlers IAM plus ECS cluster, ECR, and S3 results bucket. Uses the d
 
   ```bash
   python3 dev/extensions-service/run.py <env> build --large
-  python3 dev/extensions-service/run.py <env> build --large --extension-repo arbitiumlab
+  python3 dev/extensions-service/run.py <env> build --large --extension-repo <extension_name>
+  python3 dev/extensions-service/run.py <env> build --large --extension-repo <extension_name> --extra-extensions <ext1>,<ext2>
   ```
 
 3. **Deploy** Lambda (zip) and push the ECS image (ECR + task definition)
@@ -166,7 +167,8 @@ python3 dev/extensions-service/run.py <env> build
 
 | Flag | When to use |
 |------|-------------|
-| `--extension-repo` | Handler source folder when it differs from `<env>` (e.g. `arbitiumlab`; same idea as bootstrap `--extension-specific`) |
+| `--extension-repo` | Handler source folder when it differs from `<env>` |
+| `--extra-extensions` | Comma-separated extra extensions to bundle alongside the primary one. Their Python packages, dependencies, and `handlers_config.json` entries are merged into the artifact. |
 | `--large` | Force ECS image build (heavy deps) even before ECS is provisioned, or when you want zip + ECS image together |
 | `--no-ecs` | Lambda zip only, skip ECS image even if `provision_manifest.json` has ECS |
 | `--local` | Lambda zip for `run-local` on arm64 (ECS image stays amd64) |
