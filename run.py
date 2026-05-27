@@ -2,13 +2,11 @@
 """
 Single entry point for extension installer/service actions.
 Usage:
-  python run.py <extension> <action> [action_args...]
+  python run.py <env> <action> [action_args...]
   python run.py noma build
-  python run.py exhq deploy --clean
-  python run.py noma run-local my_handler
-  python run.py noma view-logs --follow
-  python run.py noma test my_handler
-""" 
+  python run.py arbitiumrs deploy deploy --profile myprofile
+  python run.py arbitiumrs run-local my_handler
+"""
 import json
 import os
 import subprocess
@@ -21,12 +19,11 @@ from lib import (
     get_workspace_root,
     get_function_name,
     get_lambda_deployment_zip_path,
-    get_package_dir,
     get_ecs_handlers_for_extension,
     list_extensions,
     merge_script_env,
     validate_extension,
-    validate_extension_name,
+    validate_environment_name,
 )
 from deploy_flow import cmd_build as deploy_build, cmd_publish as deploy_publish, cmd_push as deploy_push
 from deploy_input import resolve_deploy_input_file
@@ -67,12 +64,12 @@ def _run_script(script_name: str, env: dict | None = None, extra_args: list[str]
     return subprocess.run(cmd, env=run_env, cwd=cwd).returncode
 
 
-def _run_domain_main(domain_dir: str, extension: str, action: str, rest: list[str]) -> int:
+def _run_domain_main(domain_dir: str, environment: str, action: str, rest: list[str]) -> int:
     main_py = Path(__file__).resolve().parent / domain_dir / "main.py"
     if not main_py.is_file():
         print(f"ERROR: Domain entrypoint not found: {main_py}", file=sys.stderr)
         return 1
-    cmd = [sys.executable, str(main_py), extension, action, *rest]
+    cmd = [sys.executable, str(main_py), environment, action, *rest]
     return subprocess.run(cmd, cwd=get_workspace_root(), env=merge_script_env()).returncode
 
 
@@ -87,9 +84,9 @@ def cmd_list(_args: list[str]) -> int:
     return 0
 
 
-def cmd_build(extension: str, args: list[str]) -> int:
+def cmd_build(environment: str, args: list[str]) -> int:
     try:
-        return deploy_build(extension, args)
+        return deploy_build(environment, args)
     except (FileNotFoundError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
@@ -113,32 +110,33 @@ def _parse_deploy_type(args: list[str]) -> tuple[str, list[str]]:
     return deploy_type, out
 
 
-def cmd_deploy(extension: str, args: list[str]) -> int:
-    validate_extension_name(extension)
+def cmd_deploy(environment: str, args: list[str]) -> int:
+    validate_environment_name(environment)
     profile, rest = _parse_profile_and_filter_args(args)
     deploy_type, filtered_args = _parse_deploy_type(rest)
     root = get_workspace_root()
-    deployment_zip = get_lambda_deployment_zip_path(extension, root)
-    env = {
-        "EXTENSION_NAME": extension,
+    deployment_zip = get_lambda_deployment_zip_path(environment, root)
+    script_env = {
+        "EXTENSION_NAME": environment,
         "WORKSPACE_ROOT": str(root),
         "DEPLOYMENT_ZIP": str(deployment_zip),
     }
     if profile is not None:
-        env["AWS_PROFILE"] = profile
-    deploy_input = resolve_deploy_input_file(extension, get_workspace_root())
+        script_env["AWS_PROFILE"] = profile
+    deploy_input = resolve_deploy_input_file(environment, get_workspace_root())
     if deploy_input is not None:
-        env["DEPLOY_INPUT_FILE"] = str(deploy_input)
+        script_env["DEPLOY_INPUT_FILE"] = str(deploy_input)
 
     if deploy_type == "ecs":
-        rc = deploy_push(extension, filtered_args + ([f"--profile={profile}"] if profile else []))
+        rc = deploy_push(environment, filtered_args + ([f"--profile={profile}"] if profile else []))
         if rc != 0:
             return rc
-        return deploy_publish(extension, ["--type", "ecs"])
+        return deploy_publish(environment, ["--type", "ecs"])
     if deploy_type == "default":
-        ecs_handlers = get_ecs_handlers_for_extension(extension)
+        ecs_handlers = get_ecs_handlers_for_extension(environment)
         from state_store import get_state_paths
-        state_paths = get_state_paths(extension, root)
+
+        state_paths = get_state_paths(environment, root)
         handlers_config = state_paths.state_dir / "handlers_config.json"
         all_handlers = []
         if handlers_config.is_file():
@@ -148,173 +146,177 @@ def cmd_deploy(extension: str, args: list[str]) -> int:
         deploy_ecs = len(ecs_handlers) > 0
         deploy_lambda = len(ecs_handlers) == 0 or (set(h.lower() for h in all_handlers) - set(ecs_handlers))
         if deploy_lambda:
-            rc = _run_script("deploy_as_a_service.sh", env=env, extra_args=filtered_args)
+            rc = _run_script("deploy_as_a_service.sh", env=script_env, extra_args=filtered_args)
             if rc != 0:
                 return rc
         if deploy_ecs:
-            rc = deploy_push(extension, filtered_args + ([f"--profile={profile}"] if profile else []))
+            rc = deploy_push(environment, filtered_args + ([f"--profile={profile}"] if profile else []))
             if rc != 0:
                 return rc
-            return deploy_publish(extension, ["--type", "ecs"])
+            return deploy_publish(environment, ["--type", "ecs"])
         return 0
 
-    return _run_script("deploy_as_a_service.sh", env=env, extra_args=filtered_args)
+    return _run_script("deploy_as_a_service.sh", env=script_env, extra_args=filtered_args)
 
 
-def cmd_setup_iam(extension: str, args: list[str]) -> int:
-    validate_extension(extension)
+def cmd_setup_iam(environment: str, args: list[str]) -> int:
+    validate_environment_name(environment)
     profile, _ = _parse_profile_and_filter_args(args)
-    env = {
-        "EXTENSION_NAME": extension,
+    script_env = {
+        "EXTENSION_NAME": environment,
         "WORKSPACE_ROOT": str(get_workspace_root()),
     }
     if profile is not None:
-        env["AWS_PROFILE"] = profile
-    return _run_script("setup_iam_role.sh", env=env)
+        script_env["AWS_PROFILE"] = profile
+    return _run_script("setup_iam_role.sh", env=script_env)
 
 
-def cmd_provision_ecs_capacity(extension: str, args: list[str]) -> int:
+def cmd_provision_ecs_capacity(environment: str, args: list[str]) -> int:
     """Provision EC2 capacity for ECS (ASG + capacity provider)."""
-    validate_extension_name(extension)
+    validate_environment_name(environment)
     profile, _ = _parse_profile_and_filter_args(args)
-    ensure_runtime_profile_file(extension, get_workspace_root())
-    env = {
-        "EXTENSION_NAME": extension,
+    ensure_runtime_profile_file(environment, get_workspace_root())
+    script_env = {
+        "EXTENSION_NAME": environment,
         "WORKSPACE_ROOT": str(get_workspace_root()),
     }
     if profile is not None:
-        env["AWS_PROFILE"] = profile
-    return _run_script("provision_ecs_capacity.sh", env=env)
+        script_env["AWS_PROFILE"] = profile
+    return _run_script("provision_ecs_capacity.sh", env=script_env)
 
 
-def cmd_undeploy_ecs_capacity(extension: str, args: list[str]) -> int:
+def cmd_undeploy_ecs_capacity(environment: str, args: list[str]) -> int:
     """Undeploy EC2 capacity for ECS (full cleanup)."""
-    validate_extension_name(extension)
+    validate_environment_name(environment)
     profile, _ = _parse_profile_and_filter_args(args)
-    env = {
-        "EXTENSION_NAME": extension,
+    script_env = {
+        "EXTENSION_NAME": environment,
         "WORKSPACE_ROOT": str(get_workspace_root()),
     }
     if profile is not None:
-        env["AWS_PROFILE"] = profile
-    return _run_script("undeploy_ecs_capacity.sh", env=env)
+        script_env["AWS_PROFILE"] = profile
+    return _run_script("undeploy_ecs_capacity.sh", env=script_env)
 
 
-def cmd_run_local(extension: str, args: list[str]) -> int:
+def cmd_run_local(environment: str, args: list[str]) -> int:
     if not args:
         print("ERROR: run-local requires a handler name", file=sys.stderr)
-        print("Usage: run.py <ext> run-local <handler_name> [payload_file.json] [--rebuild]", file=sys.stderr)
+        print("Usage: run.py <env> run-local <handler_name> [payload_file.json] [--rebuild]", file=sys.stderr)
         return 1
-    validate_extension(extension)
-    env = {
-        "EXTENSION_NAME": extension,
+    validate_extension(environment)
+    script_env = {
+        "EXTENSION_NAME": environment,
         "WORKSPACE_ROOT": str(get_workspace_root()),
     }
-    return _run_script("run_handler_local.sh", env=env, extra_args=args)
+    return _run_script("run_handler_local.sh", env=script_env, extra_args=args)
 
 
-def cmd_view_logs(extension: str, args: list[str]) -> int:
-    validate_extension(extension)
+def cmd_view_logs(environment: str, args: list[str]) -> int:
+    validate_environment_name(environment)
     profile, filtered_args = _parse_profile_and_filter_args(args)
-    env = {
-        "EXTENSION_NAME": extension,
+    script_env = {
+        "EXTENSION_NAME": environment,
         "WORKSPACE_ROOT": str(get_workspace_root()),
     }
-    deploy_input = resolve_deploy_input_file(extension, get_workspace_root())
+    deploy_input = resolve_deploy_input_file(environment, get_workspace_root())
     if deploy_input is not None:
-        env["DEPLOY_INPUT_FILE"] = str(deploy_input)
+        script_env["DEPLOY_INPUT_FILE"] = str(deploy_input)
     try:
-        env["LAMBDA_FUNCTION_NAME"] = get_function_name(extension)
+        script_env["LAMBDA_FUNCTION_NAME"] = get_function_name(environment)
     except FileNotFoundError:
         pass
     if profile is not None:
-        env["AWS_PROFILE"] = profile
-    return _run_script("view_lambda_logs.sh", env=env, extra_args=filtered_args)
+        script_env["AWS_PROFILE"] = profile
+    return _run_script("view_lambda_logs.sh", env=script_env, extra_args=filtered_args)
 
 
-def cmd_ecs_profile(extension: str, args: list[str]) -> int:
+def cmd_ecs_profile(environment: str, args: list[str]) -> int:
     """Compatibility wrapper: runtime set-profile."""
-    validate_extension_name(extension)
+    validate_environment_name(environment)
     _profile_aws, rest = _parse_profile_and_filter_args(args)
-    return _run_domain_main("runtime-config", extension, "set-profile", rest)
+    return _run_domain_main("runtime-config", environment, "set-profile", rest)
 
 
-def cmd_provision_infra(extension: str, args: list[str]) -> int:
-    validate_extension_name(extension)
+def cmd_provision_infra(environment: str, args: list[str]) -> int:
+    validate_environment_name(environment)
     if not args:
-        print("Usage: run.py <ext> provision-infra apply|destroy|export [args...]", file=sys.stderr)
+        print("Usage: run.py <env> provision-infra apply|destroy|export [args...]", file=sys.stderr)
         return 1
     action = args[0].lower()
     rest = args[1:]
     if action in ("apply", "destroy", "export", "teardown"):
-        return _run_domain_main("provision-infra", extension, action, rest)
+        return _run_domain_main("provision-infra", environment, action, rest)
     print(f"Unknown provision-infra action: {action}", file=sys.stderr)
     return 1
 
 
-def cmd_deploy_flow(extension: str, args: list[str]) -> int:
-    validate_extension(extension)
+def cmd_deploy_flow(environment: str, args: list[str]) -> int:
+    validate_environment_name(environment)
     if not args:
-        print("Usage: run.py <ext> deploy build|push|publish [args...]", file=sys.stderr)
+        print("Usage: run.py <env> deploy build|push|publish [args...]", file=sys.stderr)
         return 1
     action = args[0].lower()
     rest = args[1:]
     if action == "build":
-        return _run_domain_main("deploy", extension, "build", rest)
+        return _run_domain_main("deploy", environment, "build", rest)
     if action == "push":
-        return _run_domain_main("deploy", extension, "push", rest)
+        return _run_domain_main("deploy", environment, "push", rest)
     if action == "publish":
-        return _run_domain_main("deploy", extension, "publish", rest)
+        return _run_domain_main("deploy", environment, "publish", rest)
     print(f"Unknown deploy action: {action}", file=sys.stderr)
     return 1
 
 
-def cmd_runtime(extension: str, args: list[str]) -> int:
-    validate_extension_name(extension)
+def cmd_runtime(environment: str, args: list[str]) -> int:
+    validate_environment_name(environment)
     if not args:
-        print("Usage: run.py <ext> runtime set-profile|export-lambda-env [args...]", file=sys.stderr)
+        print("Usage: run.py <env> runtime set-profile|export-lambda-env [args...]", file=sys.stderr)
         return 1
     action = args[0].lower()
     rest = args[1:]
     if action == "set-profile":
-        return _run_domain_main("runtime-config", extension, "set-profile", rest)
+        return _run_domain_main("runtime-config", environment, "set-profile", rest)
     if action == "export-lambda-env":
-        return _run_domain_main("runtime-config", extension, "export-lambda-env", rest)
+        return _run_domain_main("runtime-config", environment, "export-lambda-env", rest)
     print(f"Unknown runtime action: {action}", file=sys.stderr)
     return 1
 
 
-def cmd_test(extension: str, args: list[str]) -> int:
+def cmd_test(environment: str, args: list[str]) -> int:
     profile, filtered_args = _parse_profile_and_filter_args(args)
     if not filtered_args:
         print("ERROR: test requires a handler name", file=sys.stderr)
-        print("Usage: run.py <ext> test <handler_name> [--payload-file file.json] [--profile PROFILE]", file=sys.stderr)
+        print(
+            "Usage: run.py <env> test <handler_name> [--payload-file file.json] [--profile PROFILE]",
+            file=sys.stderr,
+        )
         return 1
-    validate_extension(extension)
-    function_name = get_function_name(extension)
-    env = {
-        "EXTENSION_NAME": extension,
+    validate_environment_name(environment)
+    function_name = get_function_name(environment)
+    script_env = {
+        "EXTENSION_NAME": environment,
         "WORKSPACE_ROOT": str(get_workspace_root()),
         "LAMBDA_FUNCTION_NAME": function_name,
     }
     if profile is not None:
-        env["AWS_PROFILE"] = profile
-    return _run_script("test_lambda_handler.py", env=env, extra_args=filtered_args)
+        script_env["AWS_PROFILE"] = profile
+    return _run_script("test_lambda_handler.py", env=script_env, extra_args=filtered_args)
 
 
 def main() -> int:
     if len(sys.argv) < 2:
-        print("Usage: run.py <extension> <action> [action_args...]", file=sys.stderr)
+        print("Usage: run.py <env> <action> [action_args...]", file=sys.stderr)
         print("       run.py list", file=sys.stderr)
         print("", file=sys.stderr)
-        print("Actions: list, provision-infra, deploy, runtime, build, setup-iam, ecs-profile, provision-ecs-capacity, undeploy-ecs-capacity, run-local, view-logs, test", file=sys.stderr)
+        print("Actions: list, provision-infra, deploy, runtime, build, setup-iam, ecs-profile,", file=sys.stderr)
+        print("         provision-ecs-capacity, undeploy-ecs-capacity, run-local, view-logs, test", file=sys.stderr)
         print("", file=sys.stderr)
         print("  provision-infra  Stage 1 (admin). Create AWS infra and write provision_manifest.json.", file=sys.stderr)
         print("    apply    Default (no --launch-type): Lambda IAM only. With --launch-type: also ECR/S3/ECS.", file=sys.stderr)
         print("             Options: --profile NAME, --launch-type fargate|ec2, --vpc vpc-xxxx,", file=sys.stderr)
         print("             --region REGION, --with-capacity", file=sys.stderr)
         print("    destroy   Tear down EC2 capacity only (ASG/LT/CP). Options: --profile NAME", file=sys.stderr)
-        print("    export    Print env vars for launcher/vars.json; writes state/<ext>/lambda_env_export.json", file=sys.stderr)
+        print("    export    Print env vars for launcher/vars.json; writes state/<env>/lambda_env_export.json", file=sys.stderr)
         print("    teardown  DESTRUCTIVE: Delete ALL AWS resources. Requires --yes.", file=sys.stderr)
         print("              Options: --profile NAME, --region REGION, --keep-logs (keep CloudWatch groups)", file=sys.stderr)
         print("", file=sys.stderr)
@@ -330,7 +332,7 @@ def main() -> int:
         print("  runtime          Stage 3. Adjust compute sizing without re-provisioning.", file=sys.stderr)
         print("    set-profile    Set Fargate/EC2 sizing: --small|--medium|--large, --launch-type fargate|ec2,", file=sys.stderr)
         print("                   --network-mode, --task-cpu, --task-memory, --ec2-instance-type, --asg-* flags", file=sys.stderr)
-        print("    export-lambda-env  Write state/<ext>/lambda_env_export.json (same as provision-infra export).", file=sys.stderr)
+        print("    export-lambda-env  Write state/<env>/lambda_env_export.json (same as provision-infra export).", file=sys.stderr)
         print("", file=sys.stderr)
         print("  build       Shortcut for 'deploy build'. Flags: --extension-repo FOLDER,", file=sys.stderr)
         print("              --large, --no-ecs, --local (see deploy build).", file=sys.stderr)
@@ -347,10 +349,10 @@ def main() -> int:
         return cmd_list(sys.argv[2:])
 
     if len(sys.argv) < 3:
-        print("Usage: run.py <extension> <action> [action_args...]", file=sys.stderr)
+        print("Usage: run.py <env> <action> [action_args...]", file=sys.stderr)
         return 1
 
-    extension = sys.argv[1]
+    environment = sys.argv[1]
     action = sys.argv[2].lower().replace("_", "-")
     rest = sys.argv[3:]
 
@@ -376,9 +378,9 @@ def main() -> int:
 
     if action == "deploy":
         if rest and rest[0].lower() in {"build", "push", "publish"}:
-            return cmd_deploy_flow(extension, rest)
-        return cmd_deploy(extension, rest)
-    return handlers[action](extension, rest)
+            return cmd_deploy_flow(environment, rest)
+        return cmd_deploy(environment, rest)
+    return handlers[action](environment, rest)
 
 
 if __name__ == "__main__":

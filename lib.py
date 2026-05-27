@@ -76,6 +76,11 @@ def validate_extension_name(extension: str) -> str:
     return name
 
 
+def validate_environment_name(environment: str) -> str:
+    """Validate platform environment name (alias for validate_extension_name)."""
+    return validate_extension_name(environment)
+
+
 def resolve_handlers_function_name(extension: str, workspace_root: Path | None = None) -> str:
     """Handlers Lambda name from deploy_input VARS or {extension}-handlers."""
     from deploy_input import load_lambda_config_from_deploy_input
