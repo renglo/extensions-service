@@ -16,7 +16,6 @@ WORKSPACE_ROOT="$(cd "$WORKSPACE_ROOT" && pwd)"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SERVICE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 UTILS_DIR="$SERVICE_ROOT/utils"
-PACKAGE_DIR="$WORKSPACE_ROOT/extensions/$EXTENSION_NAME/package"
 DOCKER_IMAGE="${EXTENSION_NAME}-ecs-builder:latest"
 
 AWS_REGION="${AWS_REGION:-us-east-1}"
@@ -207,13 +206,7 @@ aws ecs register-task-definition --cli-input-json "file://$TASK_DEF" --region "$
 rm -f "$TASK_DEF"
 echo "Registered task definition $ECS_TASK_FAMILY"
 
-echo "==> ECS deploy config..."
-export ECS_BUCKET ECS_CLUSTER ECS_TASK_FAMILY AWS_REGION
-export ECS_LAUNCH_TYPE="$ECS_PROFILE_LAUNCH_TYPE"
-export ECS_NETWORK_MODE="$ECS_PROFILE_NETWORK_MODE"
-"$SCRIPT_DIR/write_ecs_deploy_config.sh"
-
 echo ""
-echo "Deploy complete. ECS config written to extensions/$EXTENSION_NAME/installer/service/ecs_deploy_config.json"
+echo "Deploy complete: $EXTENSION_NAME (ECS)"
 echo ""
 [[ -n "$GENERATED_ECS_ENV_FILE" && -f "$GENERATED_ECS_ENV_FILE" ]] && rm -f "$GENERATED_ECS_ENV_FILE"

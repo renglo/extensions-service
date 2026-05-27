@@ -192,7 +192,7 @@ def cmd_build(extension: str, args: list[str]) -> int:
 
 def cmd_push(extension: str, args: list[str]) -> int:
     root = get_workspace_root()
-    validate_extension(extension, root)
+    validate_extension_name(extension)
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--profile")
     parsed, remaining = parser.parse_known_args(args)

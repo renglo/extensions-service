@@ -271,6 +271,7 @@ All under `dev/extensions-service/state/<env>/` — gitignored except `state/sch
 | `handlers_github_oidc.json` | `provision-infra apply` + `--github-repo` | Handlers OIDC metadata (merged into `deploy_input` at bootstrap) |
 | `release_manifest.json` | `deploy build` / `push` (optional `publish`) | Local audit trail: last build, last push image URI, optional `last_publish` marker |
 | `lambda_deployment.zip` | `build` | Lambda zip artifact for `deploy deploy` / `deploy update` |
+
 | `lambda_env_export.json` | `provision-infra export`, `runtime export-lambda-env` | For `launcher/vars.json` (stage 3) |
 
 ---

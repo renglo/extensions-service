@@ -90,6 +90,14 @@
         "lambda:UpdateFunctionConfiguration"
       ],
       "Resource": "arn:aws:lambda:{{AWS_REGION}}:{{AWS_ACCOUNT}}:function:{{EXTENSION_NAME}}-*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "iam:GetRole",
+        "iam:PassRole"
+      ],
+      "Resource": "arn:aws:iam::{{AWS_ACCOUNT}}:role/{{EXTENSION_NAME}}-handlers-role"
     }
   ]
 }
