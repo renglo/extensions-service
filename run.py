@@ -137,9 +137,9 @@ def cmd_deploy(extension: str, args: list[str]) -> int:
         return deploy_publish(extension, ["--type", "ecs"])
     if deploy_type == "default":
         ecs_handlers = get_ecs_handlers_for_extension(extension)
-        root = get_workspace_root()
-        package_dir = get_package_dir(extension, root)
-        handlers_config = package_dir / "handlers_config.json"
+        from state_store import get_state_paths
+        state_paths = get_state_paths(extension, root)
+        handlers_config = state_paths.state_dir / "handlers_config.json"
         all_handlers = []
         if handlers_config.is_file():
             with open(handlers_config) as f:

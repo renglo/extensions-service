@@ -97,6 +97,15 @@ def _build_single(
     rc = _run_script("build_lambda_package.sh", env=env)
     if rc != 0:
         return rc
+    # Copy handlers_config.json to state so deploy --type default can read it without the source repo
+    repo_name = (extension_repo or extension).strip()
+    source_package_dir, _ = resolve_extension_repo_dir(repo_name, root)
+    handlers_cfg_src = source_package_dir / "handlers_config.json"
+    paths_for_copy = get_state_paths(extension, root)
+    handlers_cfg_dst = paths_for_copy.state_dir / "handlers_config.json"
+    if handlers_cfg_src.is_file():
+        import shutil
+        shutil.copy2(handlers_cfg_src, handlers_cfg_dst)
     paths, manifest = _load_release_manifest(extension)
     mode = "ecs-large" if large else "lambda"
     if mode == "ecs-large":
