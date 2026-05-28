@@ -151,58 +151,47 @@ fi
 reglo_tag_ecs_cluster "$ECS_CLUSTER" "$AWS_REGION"
 
 echo "==> IAM roles..."
-# Execution role (for ECR pull and CloudWatch logs)
-if ! aws iam get-role --role-name "$EXECUTION_ROLE_NAME" 2>/dev/null; then
-  #reglo_create_iam_role "$EXECUTION_ROLE_NAME" \
-  #  '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ecs-tasks.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
-  #aws iam attach-role-policy --role-name "$EXECUTION_ROLE_NAME" --policy-arn "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
-  #echo "Created execution role $EXECUTION_ROLE_NAME"
-  echo "IAM execution role $EXECUTION_ROLE_NAME does not exist. Run provision-infra apply first." >&2
-else
-  reglo_ensure_iam_role_description "$EXECUTION_ROLE_NAME"
-fi
+echo "Using ECS IAM roles from provision-infra (no IAM updates in deploy push)."
 EXECUTION_ROLE_ARN="arn:aws:iam::${AWS_ACCOUNT}:role/${EXECUTION_ROLE_NAME}"
-
-# Task role (for S3, ECR, and Lambda invoke)
-if ! aws iam get-role --role-name "$TASK_ROLE_NAME" 2>/dev/null; then
-  #reglo_create_iam_role "$TASK_ROLE_NAME" \
-  #  '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ecs-tasks.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
-  #echo "Created task role $TASK_ROLE_NAME"
-  echo "IAM task role $TASK_ROLE_NAME does not exist. Run provision-infra apply first." >&2
-else
-  reglo_ensure_iam_role_description "$TASK_ROLE_NAME"
-fi
-# Always apply/update inline policy from template (safe: replaces only this policy, no accumulation)
-TASK_POLICY=$(mktemp)
-sed -e "s/{{ECS_BUCKET}}/$ECS_BUCKET/g" \
-    -e "s/{{AWS_REGION}}/$AWS_REGION/g" \
-    -e "s/{{AWS_ACCOUNT}}/$AWS_ACCOUNT/g" \
-    -e "s/{{ECR_REPO}}/$ECR_REPO/g" \
-    -e "s/{{EXTENSION_NAME}}/$EXTENSION_NAME/g" \
-    "$UTILS_DIR/ecs-task-role-policy.template.json" > "$TASK_POLICY"
-aws iam put-role-policy --role-name "$TASK_ROLE_NAME" --policy-name "ecs-handlers-s3-ecr" --policy-document "file://$TASK_POLICY"
-rm -f "$TASK_POLICY"
 TASK_ROLE_ARN="arn:aws:iam::${AWS_ACCOUNT}:role/${TASK_ROLE_NAME}"
+echo "  Execution: $EXECUTION_ROLE_ARN"
+echo "  Task:      $TASK_ROLE_ARN"
 
-# Attach extension handlers policy to task role (same as Lambda: S3, IAM, etc. for handler operations)
-HANDLERS_POLICY_NAME="$(echo "${EXTENSION_NAME:0:1}" | tr '[:lower:]' '[:upper:]')${EXTENSION_NAME:1}HandlersPolicy"
-HANDLERS_POLICY_ARN="arn:aws:iam::${AWS_ACCOUNT}:policy/${HANDLERS_POLICY_NAME}"
-if aws iam get-policy --policy-arn "$HANDLERS_POLICY_ARN" >/dev/null 2>&1; then
-  aws iam attach-role-policy --role-name "$TASK_ROLE_NAME" --policy-arn "$HANDLERS_POLICY_ARN"
-  echo "Attached $HANDLERS_POLICY_NAME to task role (same as Lambda handlers)"
-else
-  echo "WARNING: Policy $HANDLERS_POLICY_NAME not found. ECS task will only have ECS bucket + ECR access." >&2
-  echo "         Run: python3 run.py $EXTENSION_NAME setup-iam" >&2
-fi
-
-# Attach the platform runtime policy so ECS handler code can access DynamoDB, S3, Cognito, SES, etc.
-if aws iam get-policy --policy-arn "$TT_POLICY_ARN" >/dev/null 2>&1; then
-  aws iam attach-role-policy --role-name "$TASK_ROLE_NAME" --policy-arn "$TT_POLICY_ARN" 2>/dev/null || true
-  echo "Attached $TT_POLICY_NAME to $TASK_ROLE_NAME"
-else
-  echo "WARNING: Platform policy $TT_POLICY_NAME not found — ECS handler code will lack DynamoDB/S3/Cognito/SES access." >&2
-  echo "         Run launcher deploy_environment.py first to create it." >&2
-fi
+# IAM create/update/attach belongs in provision-infra (stage 1), not deploy push.
+#if ! aws iam get-role --role-name "$EXECUTION_ROLE_NAME" 2>/dev/null; then
+#  reglo_create_iam_role "$EXECUTION_ROLE_NAME" \
+#    '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ecs-tasks.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
+#  aws iam attach-role-policy --role-name "$EXECUTION_ROLE_NAME" --policy-arn "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+#  echo "Created execution role $EXECUTION_ROLE_NAME"
+#else
+#  reglo_ensure_iam_role_description "$EXECUTION_ROLE_NAME"
+#fi
+#if ! aws iam get-role --role-name "$TASK_ROLE_NAME" 2>/dev/null; then
+#  reglo_create_iam_role "$TASK_ROLE_NAME" \
+#    '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ecs-tasks.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
+#  echo "Created task role $TASK_ROLE_NAME"
+#else
+#  reglo_ensure_iam_role_description "$TASK_ROLE_NAME"
+#fi
+#TASK_POLICY=$(mktemp)
+#sed -e "s/{{ECS_BUCKET}}/$ECS_BUCKET/g" \
+#    -e "s/{{AWS_REGION}}/$AWS_REGION/g" \
+#    -e "s/{{AWS_ACCOUNT}}/$AWS_ACCOUNT/g" \
+#    -e "s/{{ECR_REPO}}/$ECR_REPO/g" \
+#    -e "s/{{EXTENSION_NAME}}/$EXTENSION_NAME/g" \
+#    "$UTILS_DIR/ecs-task-role-policy.template.json" > "$TASK_POLICY"
+#aws iam put-role-policy --role-name "$TASK_ROLE_NAME" --policy-name "ecs-handlers-s3-ecr" --policy-document "file://$TASK_POLICY"
+#rm -f "$TASK_POLICY"
+#HANDLERS_POLICY_NAME="$(echo "${EXTENSION_NAME:0:1}" | tr '[:lower:]' '[:upper:]')${EXTENSION_NAME:1}HandlersPolicy"
+#HANDLERS_POLICY_ARN="arn:aws:iam::${AWS_ACCOUNT}:policy/${HANDLERS_POLICY_NAME}"
+#if aws iam get-policy --policy-arn "$HANDLERS_POLICY_ARN" >/dev/null 2>&1; then
+#  aws iam attach-role-policy --role-name "$TASK_ROLE_NAME" --policy-arn "$HANDLERS_POLICY_ARN"
+#  echo "Attached $HANDLERS_POLICY_NAME to task role (same as Lambda handlers)"
+#fi
+#if aws iam get-policy --policy-arn "$TT_POLICY_ARN" >/dev/null 2>&1; then
+#  aws iam attach-role-policy --role-name "$TASK_ROLE_NAME" --policy-arn "$TT_POLICY_ARN" 2>/dev/null || true
+#  echo "Attached $TT_POLICY_NAME to $TASK_ROLE_NAME"
+#fi
 
 echo "==> Task definition..."
 TASK_DEF=$(mktemp)
