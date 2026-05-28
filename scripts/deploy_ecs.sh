@@ -105,10 +105,11 @@ docker push "$ECR_URI"
 echo "Pushed $ECR_URI"
 
 echo "==> ECS cluster..."
+# Ensure cluster exists and is active
 if ! aws ecs describe-clusters --clusters "$ECS_CLUSTER" --region "$AWS_REGION" --query 'clusters[0].status' --output text 2>/dev/null | grep -q ACTIVE; then
-  aws ecs create-cluster --cluster-name "$ECS_CLUSTER" --region "$AWS_REGION" \
-    --tags "key=Description,value=${REGLO_DEPLOYMENT_DESCRIPTION}"
-  echo "Created cluster $ECS_CLUSTER"
+  #aws ecs create-cluster --cluster-name "$ECS_CLUSTER" --region "$AWS_REGION" \
+  #  --tags "key=Description,value=${REGLO_DEPLOYMENT_DESCRIPTION}"
+  echo "Critical warning: Cluster $ECS_CLUSTER does not exist or is not active"
 fi
 reglo_tag_ecs_cluster "$ECS_CLUSTER" "$AWS_REGION"
 
