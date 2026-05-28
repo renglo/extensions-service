@@ -33,7 +33,8 @@
       "Action": [
         "ecs:RegisterTaskDefinition",
         "ecs:DescribeTaskDefinition",
-        "ecs:ListTaskDefinitions"
+        "ecs:ListTaskDefinitions",
+        "ecs:DescribeClusters"
       ],
       "Resource": "*"
     },

@@ -22,7 +22,24 @@ AWS_REGION="${AWS_REGION:-us-east-1}"
 AWS_ACCOUNT=$(aws sts get-caller-identity --query Account --output text 2>/dev/null || true)
 [[ -z "$AWS_ACCOUNT" ]] && { echo "ERROR: Could not get AWS account" >&2; exit 1; }
 
-ECS_BUCKET="${ECS_RESULTS_BUCKET:-${EXTENSION_NAME}-handlers-ecs-${AWS_ACCOUNT}}"
+ECS_BUCKET_CONTRACT="${EXTENSION_NAME}-handlers-ecs-${AWS_ACCOUNT}"
+ECS_BUCKET_FROM_INPUT=""
+_deploy_input_for_bucket=""
+if [[ -n "${DEPLOY_INPUT_FILE:-}" && -f "${DEPLOY_INPUT_FILE}" ]]; then
+  _deploy_input_for_bucket="$DEPLOY_INPUT_FILE"
+elif [[ -f "$SERVICE_ROOT/state/${EXTENSION_NAME}/deploy_input.json" ]]; then
+  _deploy_input_for_bucket="$SERVICE_ROOT/state/${EXTENSION_NAME}/deploy_input.json"
+fi
+if [[ -n "$_deploy_input_for_bucket" ]]; then
+  ECS_BUCKET_FROM_INPUT=$(python3 -c "
+import json, sys
+with open(sys.argv[1], encoding='utf-8') as f:
+    data = json.load(f)
+vars_ = data.get('VARS') or {}
+print((vars_.get('ECS_RESULTS_BUCKET') or '').strip())
+" "$_deploy_input_for_bucket" 2>/dev/null || true)
+fi
+ECS_BUCKET="${ECS_RESULTS_BUCKET:-${ECS_BUCKET_FROM_INPUT:-$ECS_BUCKET_CONTRACT}}"
 ECS_CLUSTER="${ECS_CLUSTER:-${EXTENSION_NAME}-handlers}"
 ECS_TASK_FAMILY="${ECS_TASK_DEFINITION:-${EXTENSION_NAME}-handlers-ecs}"
 ECR_REPO="${EXTENSION_NAME}-handlers-ecs"
@@ -81,21 +98,42 @@ if ! docker image inspect "$DOCKER_IMAGE" >/dev/null 2>&1; then
 fi
 
 echo "==> S3 bucket..."
-if ! aws s3api head-bucket --bucket "$ECS_BUCKET" 2>/dev/null; then
-  aws s3api create-bucket --bucket "$ECS_BUCKET" --region "$AWS_REGION" \
-    $([[ "$AWS_REGION" != "us-east-1" ]] && echo "--create-bucket-configuration LocationConstraint=$AWS_REGION" || true)
-  echo "Created bucket $ECS_BUCKET"
+_s3_bucket_found=""
+_s3_bucket_from_input="${ECS_RESULTS_BUCKET:-$ECS_BUCKET_FROM_INPUT}"
+if [[ -n "$_s3_bucket_from_input" ]]; then
+  if aws s3api head-bucket --bucket "$_s3_bucket_from_input" 2>/dev/null; then
+    _s3_bucket_found="yes"
+    ECS_BUCKET="$_s3_bucket_from_input"
+  fi
 fi
-reglo_tag_s3_bucket "$ECS_BUCKET"
-# Lifecycle: expire payloads/ and results/ after 1 day
-LIFECYCLE_FILE="$UTILS_DIR/s3-lifecycle-payloads-results.json"
-aws s3api put-bucket-lifecycle-configuration --bucket "$ECS_BUCKET" --lifecycle-configuration "file://$LIFECYCLE_FILE"
-echo "Lifecycle rule set (1 day)."
+if [[ -z "$_s3_bucket_found" ]]; then
+  if aws s3api head-bucket --bucket "$ECS_BUCKET_CONTRACT" 2>/dev/null; then
+    _s3_bucket_found="yes"
+    ECS_BUCKET="$ECS_BUCKET_CONTRACT"
+  fi
+fi
+if [[ -z "$_s3_bucket_found" ]]; then
+  if [[ -n "$_s3_bucket_from_input" ]]; then
+    echo "S3 results bucket does not exist (tried deploy_input ECS_RESULTS_BUCKET=${_s3_bucket_from_input} and contract ${ECS_BUCKET_CONTRACT}). Run provision-infra apply first." >&2
+  else
+    echo "S3 results bucket does not exist (no ECS_RESULTS_BUCKET in deploy_input; contract ${ECS_BUCKET_CONTRACT} not found). Run provision-infra apply first." >&2
+  fi
+  #aws s3api create-bucket --bucket "$ECS_BUCKET" --region "$AWS_REGION" \
+  #  $([[ "$AWS_REGION" != "us-east-1" ]] && echo "--create-bucket-configuration LocationConstraint=$AWS_REGION" || true)
+  #echo "Created bucket $ECS_BUCKET"
+else
+  reglo_tag_s3_bucket "$ECS_BUCKET"
+  # Lifecycle: expire payloads/ and results/ after 1 day
+  LIFECYCLE_FILE="$UTILS_DIR/s3-lifecycle-payloads-results.json"
+  aws s3api put-bucket-lifecycle-configuration --bucket "$ECS_BUCKET" --lifecycle-configuration "file://$LIFECYCLE_FILE"
+  echo "Lifecycle rule set (1 day) on $ECS_BUCKET."
+fi
 
 echo "==> ECR repository..."
 if ! aws ecr describe-repositories --repository-names "$ECR_REPO" --region "$AWS_REGION" 2>/dev/null; then
-  aws ecr create-repository --repository-name "$ECR_REPO" --region "$AWS_REGION"
-  echo "Created ECR repo $ECR_REPO"
+  #aws ecr create-repository --repository-name "$ECR_REPO" --region "$AWS_REGION"
+  #echo "Created ECR repo $ECR_REPO"
+  echo "ECR repository $ECR_REPO does not exist. Run provision-infra apply first." >&2
 fi
 reglo_tag_ecr_repository "$ECR_REPO" "$AWS_REGION"
 ECR_URI="${AWS_ACCOUNT}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:latest"
@@ -105,21 +143,21 @@ docker push "$ECR_URI"
 echo "Pushed $ECR_URI"
 
 echo "==> ECS cluster..."
-# Ensure cluster exists and is active
 if ! aws ecs describe-clusters --clusters "$ECS_CLUSTER" --region "$AWS_REGION" --query 'clusters[0].status' --output text 2>/dev/null | grep -q ACTIVE; then
   #aws ecs create-cluster --cluster-name "$ECS_CLUSTER" --region "$AWS_REGION" \
   #  --tags "key=Description,value=${REGLO_DEPLOYMENT_DESCRIPTION}"
-  echo "Critical warning: Cluster $ECS_CLUSTER does not exist or is not active"
+  echo "Cluster $ECS_CLUSTER does not exist or is not active. Run provision-infra apply first." >&2
 fi
 reglo_tag_ecs_cluster "$ECS_CLUSTER" "$AWS_REGION"
 
 echo "==> IAM roles..."
 # Execution role (for ECR pull and CloudWatch logs)
 if ! aws iam get-role --role-name "$EXECUTION_ROLE_NAME" 2>/dev/null; then
-  reglo_create_iam_role "$EXECUTION_ROLE_NAME" \
-    '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ecs-tasks.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
-  aws iam attach-role-policy --role-name "$EXECUTION_ROLE_NAME" --policy-arn "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
-  echo "Created execution role $EXECUTION_ROLE_NAME"
+  #reglo_create_iam_role "$EXECUTION_ROLE_NAME" \
+  #  '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ecs-tasks.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
+  #aws iam attach-role-policy --role-name "$EXECUTION_ROLE_NAME" --policy-arn "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+  #echo "Created execution role $EXECUTION_ROLE_NAME"
+  echo "IAM execution role $EXECUTION_ROLE_NAME does not exist. Run provision-infra apply first." >&2
 else
   reglo_ensure_iam_role_description "$EXECUTION_ROLE_NAME"
 fi
@@ -127,9 +165,10 @@ EXECUTION_ROLE_ARN="arn:aws:iam::${AWS_ACCOUNT}:role/${EXECUTION_ROLE_NAME}"
 
 # Task role (for S3, ECR, and Lambda invoke)
 if ! aws iam get-role --role-name "$TASK_ROLE_NAME" 2>/dev/null; then
-  reglo_create_iam_role "$TASK_ROLE_NAME" \
-    '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ecs-tasks.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
-  echo "Created task role $TASK_ROLE_NAME"
+  #reglo_create_iam_role "$TASK_ROLE_NAME" \
+  #  '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ecs-tasks.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
+  #echo "Created task role $TASK_ROLE_NAME"
+  echo "IAM task role $TASK_ROLE_NAME does not exist. Run provision-infra apply first." >&2
 else
   reglo_ensure_iam_role_description "$TASK_ROLE_NAME"
 fi
