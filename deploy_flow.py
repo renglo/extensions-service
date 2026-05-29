@@ -233,14 +233,8 @@ def cmd_push(extension: str, args: list[str]) -> int:
     if ecs_task_def:
         env["ECS_TASK_DEFINITION"] = ecs_task_def
 
-    # ECS launch profile: use file if present, otherwise inject key vars from deploy_input VARS
-    if paths.runtime_profile.is_file():
-        env["ECS_PROFILE_FILE"] = str(paths.runtime_profile)
-    else:
-        if ecs_env.get("ECS_LAUNCH_TYPE"):
-            env["ECS_PROFILE_LAUNCH_TYPE"] = str(ecs_env["ECS_LAUNCH_TYPE"])
-        if ecs_env.get("ECS_NETWORK_MODE"):
-            env["ECS_PROFILE_NETWORK_MODE"] = str(ecs_env["ECS_NETWORK_MODE"])
+    # ECS launch profile: resolved in deploy_ecs.sh (manifest → deploy_input → AWS CLI).
+    # runtime_profile.json is stage 3 only; not used here.
 
     deploy_input_file = resolve_deploy_input_file(extension, root)
     if deploy_input_file is not None:

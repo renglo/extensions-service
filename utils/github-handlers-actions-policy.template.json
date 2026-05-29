@@ -34,7 +34,9 @@
         "ecs:RegisterTaskDefinition",
         "ecs:DescribeTaskDefinition",
         "ecs:ListTaskDefinitions",
-        "ecs:DescribeClusters"
+        "ecs:DescribeClusters",
+        "ecs:ListContainerInstances",
+        "ecs:DescribeCapacityProviders"
       ],
       "Resource": "*"
     },

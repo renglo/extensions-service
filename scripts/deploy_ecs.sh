@@ -56,18 +56,12 @@ echo "=========================================="
 echo ""
 
 PROFILE_ENV=$(mktemp)
-if [[ -n "${ECS_PROFILE_FILE:-}" && -f "${ECS_PROFILE_FILE}" ]]; then
-  ECS_PROFILE_FILE="$ECS_PROFILE_FILE" python3 -c "
-import json, os
-data = json.load(open(os.environ['ECS_PROFILE_FILE'], encoding='utf-8'))
-print(f\"ECS_PROFILE_LAUNCH_TYPE={data.get('launch_type','fargate')}\")
-print(f\"ECS_PROFILE_NETWORK_MODE={data.get('network_mode','awsvpc')}\")
-print(f\"ECS_PROFILE_TASK_CPU={data.get('task_cpu',1024)}\")
-print(f\"ECS_PROFILE_TASK_MEMORY={data.get('task_memory',4096)}\")
-" > "$PROFILE_ENV"
-else
-  python3 "$SERVICE_ROOT/ecs_profile.py" export-for-deploy "$WORKSPACE_ROOT" "$EXTENSION_NAME" > "$PROFILE_ENV"
-fi
+# Stage 2: manifest → deploy_input → AWS CLI → smart default (not runtime_profile.json).
+python3 "$SERVICE_ROOT/ecs_deploy_profile.py" export-shell \
+  "$WORKSPACE_ROOT" "$EXTENSION_NAME" \
+  --region "$AWS_REGION" \
+  --cluster "$ECS_CLUSTER" \
+  --task-family "$ECS_TASK_FAMILY" > "$PROFILE_ENV"
 # shellcheck disable=SC1090
 source "$PROFILE_ENV"
 rm -f "$PROFILE_ENV"
@@ -78,6 +72,7 @@ ECS_PROFILE_TASK_CPU="${ECS_PROFILE_TASK_CPU:-1024}"
 ECS_PROFILE_TASK_MEMORY="${ECS_PROFILE_TASK_MEMORY:-4096}"
 
 echo "ECS profile: launch_type=$ECS_PROFILE_LAUNCH_TYPE network_mode=$ECS_PROFILE_NETWORK_MODE cpu=$ECS_PROFILE_TASK_CPU memory=$ECS_PROFILE_TASK_MEMORY"
+[[ -n "${ECS_PROFILE_SOURCES:-}" ]] && echo "ECS profile sources: $ECS_PROFILE_SOURCES"
 echo ""
 
 TASK_DEF_TEMPLATE="$UTILS_DIR/ecs-task-definition.template.json"
