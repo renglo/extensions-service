@@ -60,8 +60,17 @@ policy = {
         {
             "Sid": "ECSRunTask",
             "Effect": "Allow",
-            "Action": ["ecs:RunTask"],
-            "Resource": f"arn:aws:ecs:{region}:{account}:task-definition/{ext}-handlers-ecs:*",
+            "Action": [
+                "ecs:RunTask",
+                "ecs:DescribeTasks",
+                "ecs:ListTasks",
+                "ecs:DescribeClusters",
+            ],
+            "Resource": [
+                f"arn:aws:ecs:{region}:{account}:cluster/{ext}-handlers",
+                f"arn:aws:ecs:{region}:{account}:task-definition/{ext}-handlers-ecs:*",
+                f"arn:aws:ecs:{region}:{account}:task/{ext}-handlers/*",
+            ],
         },
         {
             "Sid": "ECSPassRole",
