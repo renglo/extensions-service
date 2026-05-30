@@ -57,6 +57,46 @@ if [[ "$ACTION" != "deploy" && "$ACTION" != "update" && "$ACTION" != "undeploy" 
   exit 1
 fi
 
+# Wait until Lambda code/config update completes (avoids ResourceConflict on config update).
+wait_for_lambda_updated() {
+  local function_name="$1"
+  local region="$2"
+  local timeout_s="${3:-600}"
+  local elapsed=0
+  echo "==> Waiting for $function_name to become Active..."
+  while (( elapsed < timeout_s )); do
+    local state last_status reason
+    if ! read -r state last_status <<< "$(aws lambda get-function-configuration \
+      --function-name "$function_name" \
+      --region "$region" \
+      --query '[State, LastUpdateStatus]' \
+      --output text \
+      --no-cli-pager 2>/dev/null)"; then
+      sleep 3
+      elapsed=$((elapsed + 3))
+      continue
+    fi
+    if [[ "$state" == "Active" && ( "$last_status" == "Successful" || "$last_status" == "None" || -z "$last_status" ) ]]; then
+      echo "  Lambda ready (State=$state)"
+      return 0
+    fi
+    if [[ "$last_status" == "Failed" ]]; then
+      reason=$(aws lambda get-function-configuration \
+        --function-name "$function_name" \
+        --region "$region" \
+        --query 'LastUpdateStatusReason' \
+        --output text \
+        --no-cli-pager 2>/dev/null || echo "unknown")
+      echo "ERROR: Lambda update failed for $function_name: $reason" >&2
+      return 1
+    fi
+    sleep 3
+    elapsed=$((elapsed + 3))
+  done
+  echo "ERROR: Timed out after ${timeout_s}s waiting for $function_name" >&2
+  return 1
+}
+
 echo "=========================================="
 echo "Lambda Deployment: $EXTENSION_NAME ($FUNCTION_NAME)"
 echo "Action: $ACTION"
@@ -142,17 +182,20 @@ else
     --region "$AWS_REGION" \
     --zip-file "fileb://$DEPLOYMENT_ZIP" \
     --no-cli-pager || { rm -f "$TEMP_CONFIG"; exit 1; }
+  wait_for_lambda_updated "$FUNCTION_NAME" "$AWS_REGION" || { rm -f "$TEMP_CONFIG"; exit 1; }
   python3 -c "
 import json
 with open('$TEMP_CONFIG') as f: c = json.load(f)
 up = {k: c.get(k) for k in ('Role','Handler','Timeout','MemorySize','Environment','Description') if c.get(k)}
 with open('$TEMP_CONFIG', 'w') as f: json.dump(up, f, indent=2)
 "
+  echo "==> Updating Lambda configuration (env vars)..."
   aws lambda update-function-configuration \
     --function-name "$FUNCTION_NAME" \
     --region "$AWS_REGION" \
     --cli-input-json "file://$TEMP_CONFIG" \
-    --no-cli-pager 2>/dev/null || true
+    --no-cli-pager || { rm -f "$TEMP_CONFIG"; exit 1; }
+  wait_for_lambda_updated "$FUNCTION_NAME" "$AWS_REGION" || { rm -f "$TEMP_CONFIG"; exit 1; }
 fi
 
 rm -f "$TEMP_CONFIG"
