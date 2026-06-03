@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ExtensionServiceReleaseManifest",
+  "type": "object",
+  "required": ["state_version", "extension", "updated_at"],
+  "properties": {
+    "state_version": { "type": "integer" },
+    "extension": { "type": "string" },
+    "updated_at": { "type": "string" },
+    "last_build": {
+      "type": ["object", "null"],
+      "properties": {
+        "mode": { "type": "string" },
+        "image": { "type": "string" },
+        "platform": { "type": "string" },
+        "created_at": { "type": "string" }
+      }
+    },
+    "last_push": {
+      "type": ["object", "null"],
+      "properties": {
+        "image_uri": { "type": "string" },
+        "created_at": { "type": "string" }
+      }
+    },
+    "last_publish": {
+      "type": ["object", "null"],
+      "properties": {
+        "target": { "type": "string" },
+        "created_at": { "type": "string" }
+      }
+    }
+  }
+}

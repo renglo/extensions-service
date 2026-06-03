@@ -3,11 +3,16 @@ set -euo pipefail
 
 # Build Lambda deployment package using Docker (shared script).
 # Requires: EXTENSION_NAME, WORKSPACE_ROOT in environment (set by run.py).
+# Optional: EXTENSION_REPO, DOCKER_SOURCE_COPY_PATH, PYTHON_PACKAGE, OUTPUT_STATE_DIR, DEPLOYMENT_ZIP.
 
 if [[ -z "${EXTENSION_NAME:-}" || -z "${WORKSPACE_ROOT:-}" ]]; then
-  echo "ERROR: EXTENSION_NAME and WORKSPACE_ROOT must be set (run via: python dev/extension-service/run.py <ext> build)" >&2
+  echo "ERROR: EXTENSION_NAME and WORKSPACE_ROOT must be set (run via: python run.py <env> build)" >&2
   exit 1
 fi
+
+EXTENSION_REPO="${EXTENSION_REPO:-$EXTENSION_NAME}"
+PYTHON_PACKAGE="${PYTHON_PACKAGE:-$EXTENSION_NAME}"
+DOCKER_SOURCE_COPY_PATH="${DOCKER_SOURCE_COPY_PATH:-extensions/$EXTENSION_REPO/package}"
 
 # Extra extensions to bundle alongside the primary one (comma-separated, e.g. "pes,schd").
 # Set by run.py from EXTERNAL_HANDLERS in env_config.py.
@@ -40,11 +45,21 @@ done
 
 WORKSPACE_ROOT="$(cd "$WORKSPACE_ROOT" && pwd)"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PACKAGE_DIR="$WORKSPACE_ROOT/extensions/$EXTENSION_NAME/package"
-SERVICE_DIR="$WORKSPACE_ROOT/extensions/$EXTENSION_NAME/installer/service"
-RENGLO_LIB_DIR="$WORKSPACE_ROOT/dev/renglo-lib"
-BUILD_DIR="$PACKAGE_DIR/.lambda_build"
-OUTPUT_ZIP="$PACKAGE_DIR/lambda_deployment.zip"
+SOURCE_PACKAGE_DIR="$WORKSPACE_ROOT/$DOCKER_SOURCE_COPY_PATH"
+SOURCE_PACKAGE_DIR="${SOURCE_PACKAGE_DIR%/}"
+SERVICE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+if [[ -z "${OUTPUT_STATE_DIR:-}" ]]; then
+  OUTPUT_STATE_DIR=$(python3 -c "
+import sys
+sys.path.insert(0, '${SERVICE_ROOT}')
+from state_store import get_state_paths
+print(get_state_paths('${EXTENSION_NAME}').state_dir)
+")
+fi
+OUTPUT_STATE_DIR="$(mkdir -p "$OUTPUT_STATE_DIR" && cd "$OUTPUT_STATE_DIR" && pwd)"
+DEPLOYMENT_ZIP="${DEPLOYMENT_ZIP:-$OUTPUT_STATE_DIR/lambda_deployment.zip}"
+BUILD_DIR="$OUTPUT_STATE_DIR/.lambda_build"
+OUTPUT_ZIP="$DEPLOYMENT_ZIP"
 # Build for Lambda (amd64) by default; set EXTENSION_SERVICE_NATIVE_PLATFORM=1 for local-only arm64 image.
 # Set EXTENSION_SERVICE_LARGE_BUILD=1 for ECS (installs [large-dependencies] extra, outputs ecs-builder image, no zip).
 BUILD_LARGE="${EXTENSION_SERVICE_LARGE_BUILD:-0}"
@@ -77,10 +92,12 @@ else
 fi
 echo ""
 
-if [[ ! -d "$PACKAGE_DIR" ]]; then
-  echo "ERROR: Package directory not found: $PACKAGE_DIR" >&2
+if [[ ! -d "$SOURCE_PACKAGE_DIR" ]]; then
+  echo "ERROR: Source package directory not found: $SOURCE_PACKAGE_DIR" >&2
   exit 1
 fi
+
+mkdir -p "$OUTPUT_STATE_DIR"
 
 if [[ -d "$BUILD_DIR" ]]; then
   echo "==> Cleaning previous build..."
@@ -131,7 +148,7 @@ RUN python3.12 -m pip install --upgrade pip setuptools wheel && \\
 
 WORKDIR /build
 
-COPY extensions/${EXTENSION_NAME}/package/ /build/package/
+COPY ${DOCKER_SOURCE_COPY_PATH}/ /build/package/
 COPY dev/renglo-lib/ /build/renglo-lib/
 ${EXTRA_COPY_LINES}
 RUN set -e && \\
@@ -142,9 +159,9 @@ RUN set -e && \\
     python3.12 -m pip install --no-cache-dir build wheel setuptools-scm 2>&1 && \\
     python3.12 -c "import tomllib, subprocess, sys; deps=tomllib.load(open('/build/package/pyproject.toml','rb'))['project']['dependencies']; [subprocess.run([sys.executable, '-m', 'pip', 'install', '--no-cache-dir', '--target', '/build/output', d], check=False) or True for d in deps]" 2>&1 | tail -60 && \\
     $RUN_LARGE_DEPS_LINE
-    echo "Checking if ${EXTENSION_NAME} package was installed..." && \\
-    (test -d /build/output/${EXTENSION_NAME} && echo "  ✓ ${EXTENSION_NAME} directory found" || echo "  ✗ ${EXTENSION_NAME} NOT found - will copy source") && \\
-    cp -r /build/package/${EXTENSION_NAME} /build/output/ && \\
+    echo "Checking if ${PYTHON_PACKAGE} package was installed..." && \\
+    (test -d /build/output/${PYTHON_PACKAGE} && echo "  ✓ ${PYTHON_PACKAGE} directory found" || echo "  ✗ ${PYTHON_PACKAGE} NOT found - will copy source") && \\
+    cp -r /build/package/${PYTHON_PACKAGE} /build/output/ && \\
     cp /build/package/lambda_router.py /build/output/ && \\
     cp /build/package/handlers_config.json /build/output/ 2>/dev/null || true && \\
     python3.12 -c "import sys; sys.path.insert(0, '/build/output'); import yaml; print('✓ yaml OK')" && \\
@@ -184,7 +201,7 @@ if [[ "$EXTRACT_ZIP" == "true" ]]; then
   docker run --rm \
     --platform "$DOCKER_PLATFORM" \
     --entrypoint /bin/sh \
-    -v "$PACKAGE_DIR:/output" \
+    -v "$OUTPUT_STATE_DIR:/output" \
     "$DOCKER_IMAGE" \
     -c "cp /build/lambda_deployment.zip /output/ && chmod 644 /output/lambda_deployment.zip" || {
     echo "ERROR: Failed to extract deployment package" >&2
@@ -202,7 +219,11 @@ if [[ "$EXTRACT_ZIP" == "true" ]]; then
   echo "=========================================="
   echo "Package: $OUTPUT_ZIP"
   echo "Size: $ZIP_SIZE"
-  echo "Primary extension: $EXTENSION_NAME"
+  echo "Primary env: $EXTENSION_NAME"
+  if [[ "$EXTENSION_REPO" != "$EXTENSION_NAME" ]]; then
+    echo "Source repo:     $EXTENSION_REPO ($DOCKER_SOURCE_COPY_PATH)"
+    echo "Python package:  $PYTHON_PACKAGE"
+  fi
   if [[ ${#EXTRA_EXT_ARRAY[@]} -gt 0 ]]; then
     echo "Bundled extras:    ${EXTRA_EXT_ARRAY[*]}"
   fi
@@ -214,7 +235,11 @@ else
   echo "Build complete!"
   echo "=========================================="
   echo "Image: $DOCKER_IMAGE"
-  echo "Primary extension: $EXTENSION_NAME"
+  echo "Primary env: $EXTENSION_NAME"
+  if [[ "$EXTENSION_REPO" != "$EXTENSION_NAME" ]]; then
+    echo "Source repo:     $EXTENSION_REPO ($DOCKER_SOURCE_COPY_PATH)"
+    echo "Python package:  $PYTHON_PACKAGE"
+  fi
   if [[ ${#EXTRA_EXT_ARRAY[@]} -gt 0 ]]; then
     echo "Bundled extras:    ${EXTRA_EXT_ARRAY[*]}"
   fi

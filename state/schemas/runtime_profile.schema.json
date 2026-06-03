@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ExtensionServiceRuntimeProfile",
+  "type": "object",
+  "required": [
+    "state_version",
+    "updated_at",
+    "launch_type",
+    "network_mode",
+    "task_cpu",
+    "task_memory"
+  ],
+  "properties": {
+    "state_version": { "type": "integer" },
+    "updated_at": { "type": "string" },
+    "launch_type": { "type": "string", "enum": ["fargate", "ec2"] },
+    "size": { "type": "string" },
+    "network_mode": { "type": "string" },
+    "task_cpu": { "type": ["integer", "string"] },
+    "task_memory": { "type": ["integer", "string"] },
+    "ec2_instance_type": { "type": "string" },
+    "asg_min_size": { "type": "integer" },
+    "asg_desired_capacity": { "type": "integer" },
+    "asg_max_size": { "type": "integer" }
+  }
+}

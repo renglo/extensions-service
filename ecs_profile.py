@@ -21,15 +21,15 @@ SIZE_PRESETS: dict[str, dict[str, Any]] = {
         "task_cpu": 512,
         "task_memory": 1024,
         "ec2_instance_type": "m5.large",
-        "asg_min_size": 0,
-        "asg_desired_capacity": 0,
+        "asg_min_size": 1,
+        "asg_desired_capacity": 1,
         "asg_max_size": 1,
     },
     "medium": {
         "task_cpu": 1024,
         "task_memory": 4096,
         "ec2_instance_type": "m5.xlarge",
-        "asg_min_size": 0,
+        "asg_min_size": 1,
         "asg_desired_capacity": 1,
         "asg_max_size": 2,
     },
@@ -149,8 +149,13 @@ def maybe_warn_instance_vs_task(profile: dict[str, Any]) -> None:
 
 
 def build_profile_for_deploy(workspace_root: str | Path, extension: str) -> dict[str, Any]:
-    path = profile_path(workspace_root, extension)
-    raw = load_profile(path)
+    from state_store import get_state_paths
+
+    state_path = get_state_paths(extension, workspace_root).runtime_profile
+    raw = load_profile(state_path)
+    if not raw:
+        path = profile_path(workspace_root, extension)
+        raw = load_profile(path)
     if not raw:
         data = default_profile()
     else:
@@ -187,8 +192,8 @@ def export_for_deploy_shell(workspace_root: str, extension: str) -> None:
     cpu = str(data.get("task_cpu") or "1024")
     mem = str(data.get("task_memory") or "4096")
     inst = str(data.get("ec2_instance_type") or "m5.xlarge")
-    asg_min = str(data.get("asg_min_size") or "0")
-    asg_desired = str(data.get("asg_desired_capacity") or "0")
+    asg_min = str(data.get("asg_min_size") if data.get("asg_min_size") is not None else "1")
+    asg_desired = str(data.get("asg_desired_capacity") if data.get("asg_desired_capacity") is not None else "1")
     asg_max = str(data.get("asg_max_size") or "1")
     print(f"export ECS_PROFILE_LAUNCH_TYPE={shlex.quote(lt)}")
     print(f"export ECS_PROFILE_NETWORK_MODE={shlex.quote(nm)}")

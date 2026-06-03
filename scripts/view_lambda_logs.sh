@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# shellcheck source=_common.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_common.sh"
 
 # View CloudWatch Logs for extension Handlers Lambda (shared script).
 # Requires: EXTENSION_NAME, WORKSPACE_ROOT. Args: [--follow] [--filter PATTERN] [--hours N]
@@ -9,8 +11,24 @@ if [[ -z "${EXTENSION_NAME:-}" || -z "${WORKSPACE_ROOT:-}" ]]; then
   exit 1
 fi
 
-LAMBDA_CONFIG="$WORKSPACE_ROOT/extensions/$EXTENSION_NAME/installer/service/lambda_config.json"
-FUNCTION_NAME=$(python3 -c "import json; print(json.load(open('$LAMBDA_CONFIG'))['FunctionName'])")
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SERVICE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+if [[ -n "${LAMBDA_FUNCTION_NAME:-}" ]]; then
+  FUNCTION_NAME="$LAMBDA_FUNCTION_NAME"
+elif [[ -n "${DEPLOY_INPUT_FILE:-}" && -f "${DEPLOY_INPUT_FILE}" ]]; then
+  FUNCTION_NAME=$(python3 -c "
+import sys
+sys.path.insert(0, '${SERVICE_ROOT}')
+from pathlib import Path
+from deploy_input import build_lambda_config, deploy_input_from_path
+payload = deploy_input_from_path(Path('${DEPLOY_INPUT_FILE}'))
+print(build_lambda_config(payload, '${EXTENSION_NAME}')['FunctionName'])
+")
+else
+  echo "ERROR: Set LAMBDA_FUNCTION_NAME or DEPLOY_INPUT_FILE (path to deploy_input.json)" >&2
+  exit 1
+fi
 LOG_GROUP="/aws/lambda/${FUNCTION_NAME}"
 AWS_REGION="${AWS_REGION:-us-east-1}"
 FOLLOW=false
@@ -36,6 +54,22 @@ echo "=========================================="
 echo "CloudWatch Logs: $LOG_GROUP"
 echo "=========================================="
 echo ""
+
+if ! aws logs describe-log-groups --log-group-name-prefix "$LOG_GROUP" --region "$AWS_REGION" \
+  --query "logGroups[?logGroupName=='${LOG_GROUP}'].logGroupName" --output text 2>/dev/null \
+  | grep -qF "$LOG_GROUP"; then
+  echo "Log group not found; creating $LOG_GROUP ..."
+  ensure_cloudwatch_log_group "$LOG_GROUP" "$AWS_REGION"
+fi
+
+if ! aws logs describe-log-groups --log-group-name-prefix "$LOG_GROUP" --region "$AWS_REGION" \
+  --query "logGroups[?logGroupName=='${LOG_GROUP}'].logGroupName" --output text 2>/dev/null \
+  | grep -qF "$LOG_GROUP"; then
+  echo "ERROR: Log group $LOG_GROUP does not exist in $AWS_REGION." >&2
+  echo "       Run: python3 run.py $EXTENSION_NAME deploy deploy --profile <aws-profile>" >&2
+  echo "       Or invoke the function once (Lambda creates the group on first run if IAM allows it)." >&2
+  exit 1
+fi
 
 if [[ "$FOLLOW" == "true" ]]; then
   if [[ -n "$FILTER_PATTERN" ]]; then

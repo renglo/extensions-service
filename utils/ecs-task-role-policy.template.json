@@ -2,9 +2,39 @@
   "Version": "2012-10-17",
   "Statement": [
     {
+      "Sid": "ECSHandshakeS3",
       "Effect": "Allow",
       "Action": ["s3:GetObject", "s3:PutObject"],
       "Resource": "arn:aws:s3:::{{ECS_BUCKET}}/*"
+    },
+    {
+      "Sid": "ECSRunTaskChain",
+      "Effect": "Allow",
+      "Action": [
+        "ecs:RunTask",
+        "ecs:DescribeTasks",
+        "ecs:ListTasks",
+        "ecs:DescribeClusters"
+      ],
+      "Resource": [
+        "arn:aws:ecs:{{AWS_REGION}}:{{AWS_ACCOUNT}}:cluster/{{EXTENSION_NAME}}-handlers",
+        "arn:aws:ecs:{{AWS_REGION}}:{{AWS_ACCOUNT}}:task-definition/{{EXTENSION_NAME}}-handlers-ecs:*",
+        "arn:aws:ecs:{{AWS_REGION}}:{{AWS_ACCOUNT}}:task/{{EXTENSION_NAME}}-handlers/*"
+      ]
+    },
+    {
+      "Sid": "ECSPassRoleChain",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": [
+        "arn:aws:iam::{{AWS_ACCOUNT}}:role/{{EXTENSION_NAME}}-handlers-ecs-execution",
+        "arn:aws:iam::{{AWS_ACCOUNT}}:role/{{EXTENSION_NAME}}-handlers-ecs-task"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "ecs-tasks.amazonaws.com"
+        }
+      }
     },
     {
       "Effect": "Allow",

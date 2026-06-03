@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# shellcheck source=_common.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_common.sh"
 
 # Run extension handlers locally via Docker (shared script).
 # Requires: EXTENSION_NAME, WORKSPACE_ROOT. Args: <handler_name> [payload_file.json] [--rebuild]

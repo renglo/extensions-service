@@ -1,117 +1,349 @@
-# Extension service (shared build, deploy, IAM, test, logs)
+# Extension service (provision-infra + deploy + runtime-config)
 
-Single entry point to build, deploy, set up IAM, run locally, view logs, and test handler Lambdas for any extension that has `installer/service` with `lambda_config.json`.
+Manages the full lifecycle of extension handler deployments across three permission stages, each with a local source of truth under `dev/extensions-service/state/<env>/`.
 
-## Usage (from repo root)
+Short deploy-flow diagram: [DEPLOY_FLOW.md].
 
-Use `python3` (or `python` if it points to Python 3):
+## Stages overview
 
-```bash
-# List extensions that support this (have installer/service/lambda_config.json)
-python3 dev/extensions-service/run.py list
+| Stage | Command | Permissions | Output |
+|-------|---------|-------------|--------|
+| 1 — provision-infra | `provision-infra apply` | Admin (IAM; optional ECR/ECS/S3) | `provision_manifest.json`, optional `handlers_github_oidc.json` |
+| 2a — deploy Lambda | `deploy build` + `deploy deploy` (zip) | DevOps (Lambda create/update) | Function `{ext}-handlers` on AWS |
+| 2b — deploy ECS | `deploy build` + `deploy push` | DevOps (ECR push, ECS task def) | ECR image + task definition |
+| 3 — runtime-config | `runtime set-profile / export-lambda-env` | Moderate (ASG update) | `runtime_profile.json`, `lambda_env_export.json` |
 
-# Build: Lambda (default), ECS large (--large), or local ARM (--local)
-python3 dev/extensions-service/run.py <extension> build                 # Lambda zip + image
-python3 dev/extensions-service/run.py <extension> build --large           # ECS image (with [large-dependencies] extra)
-python3 dev/extensions-service/run.py <extension> build --local           # arm64 for run-local
+---
 
-# ECS profile (Fargate vs EC2, CPU/memory presets) — optional; defaults created on first ECS deploy
-python3 dev/extensions-service/run.py <extension> ecs-profile --medium
-python3 dev/extensions-service/run.py <extension> ecs-profile --launch-type ec2 --large
-python3 dev/extensions-service/run.py <extension> ecs-profile --network-mode bridge   # usually default for EC2
-python3 dev/extensions-service/run.py <extension> ecs-profile --force --launch-type fargate
+## Quick setup guide
 
-# EC2 capacity lifecycle (ASG + launch template + capacity provider)
-python3 dev/extensions-service/run.py <extension> provision-ecs-capacity
-python3 dev/extensions-service/run.py <extension> undeploy-ecs-capacity
+Run from the repo root. Replace `<env>` and `<aws-profile>` with your values.
 
-# Deploy: create or update Lambda and/or ECS (--type lambda | ecs | default)
-python3 dev/extensions-service/run.py <extension> deploy deploy       # Lambda only (default)
-python3 dev/extensions-service/run.py <extension> deploy deploy --type ecs   # ECS only (large image; uses installer/ecs_profile.json)
-python3 dev/extensions-service/run.py <extension> deploy deploy --type default # both if EXTERNAL_HANDLERS_ECS_HANDLERS has entries
-python3 dev/extensions-service/run.py <extension> deploy deploy --clean
-python3 dev/extensions-service/run.py <extension> deploy deploy --profile my-aws-profile
-python3 dev/extensions-service/run.py <extension> deploy update
-python3 dev/extensions-service/run.py <extension> deploy undeploy      # delete Lambda function
+**`<env>`** is the platform environment name (same as `bootstrap/install.py` and launcher). It selects `state/<env>/` and AWS resource prefixes from provision.
 
-# Create/update IAM policy and role for the Lambda
-python3 dev/extensions-service/run.py <extension> setup-iam
-python3 dev/extensions-service/run.py <extension> setup-iam --profile my-aws-profile
+**Provision stage:** Is recomendend to be excecuted from the main infra installer, using `bootstrap/install.py`; but it can be done in the main proyect folder (where you have `system/`). But you will not have a pre-made `deploy_input.json`. In both cases, the json must be manally copied into `extensions-service/state/<env>`
 
-# Run a handler locally (Docker)
-python3 dev/extensions-service/run.py <extension> run-local <handler_name>
-python3 dev/extensions-service/run.py <extension> run-local <handler_name> path/to/payload.json
-python3 dev/extensions-service/run.py <extension> run-local <handler_name> path/to/payload.json --rebuild
-```
-**Build modes:**
+**Before stage 2:** place `deploy_input.json` at `dev/extensions-service/state/<env>/deploy_input.json` (see [Stage 2 — deploy]). After bootstrap, copy it from `bootstrap/state/<env>/deploy_input.json`.
 
-| Goal | Command | Image | Zip |
-|------|---------|--------|-----|
-| **Lambda** (handlers ligeros) | `run.py <ext> build` | `<ext>-lambda-builder:latest` (amd64) | `lambda_deployment.zip` |
-| **ECS large** (handlers con [large-dependencies], TensorFlow, etc.) | `run.py <ext> build --large` | `<ext>-ecs-builder:latest` (amd64) | none |
-| **Local ARM (M1/M2)** | `run.py <ext> build --local` | `<ext>-lambda-builder:local` (arm64) | not extracted |
+**github-repo:** Using this option will create an OIDC configuration for the specified GitHub repository. This can later be used to grant permission to a workflow.yml file in that repository to perform the Build and Deploy phases.
 
-- **Deploy Lambda:** `build` then `deploy deploy` (or `deploy deploy --type lambda`). Uses zip.
-- **Deploy ECS:** Run `setup-iam` once (so the handlers policy exists), then `build --large` and `deploy deploy --type ecs`. Optionally run **`ecs-profile`** first to set `launch_type` (default **fargate**), **CPU/memory** presets (`--small|--medium|--large`), and EC2 **network_mode** (default **bridge** for `launch_type=ec2`). The ECS task role gets the same policy as the Lambda role (`<name>-handlers-iam-policy`), so handlers can access S3, etc. Creates S3 bucket (lifecycle 3 days), ECR, cluster, task definition, and writes **`extensions/<name>/installer/service/ecs_deploy_config.json`** (`launch_type`, `network_mode`, subnets/SGs when needed). For **Fargate** or **EC2 awsvpc**, set `subnets` and `security_groups` if default VPC discovery fails (or use `ECS_SUBNETS` / `ECS_SECURITY_GROUPS`). For **EC2 bridge/host**, register container instances in the cluster (ECS-optimized AMI); no VPC networking is passed to `run_task`.
-- **Provision EC2 capacity:** Use `provision-ecs-capacity` only when needed. It creates/updates instance role/profile (minimal ECS+SSM), launch template (AMI from SSM), ASG, and capacity provider for this extension cluster.
-- **Undeploy EC2 capacity (full cleanup):** `undeploy-ecs-capacity` sets ASG to `0/0/0`, disassociates/deletes capacity provider, and removes ASG, launch template, and instance role/profile.
+### Lambda only
 
-- **Deploy both (default):** `deploy deploy --type default` deploys Lambda if there are light handlers and ECS if there are ECS handlers (from list).
+Provisions handlers IAM + Lambda path only (no ECS cluster, ECR, or S3 results bucket).
 
-**ECS config file:** After `deploy --type ecs`, the system reads ECS settings from `ecs_deploy_config.json` when present; env vars (e.g. `ECS_SUBNETS`, `ECS_SECURITY_GROUPS`) override or fill missing keys.
+1. **Provision (admin, once)**
 
   ```bash
-  python3 dev/extension-service/run.py exhq build --local
-  python3 dev/extension-service/run.py exhq run-local ping
+  python3 dev/extensions-service/run.py <env> provision-infra apply \
+    --profile <aws-profile>
+    --github-repo <org>/<handlers-repo> #Optional
   ```
 
-```bash
-# View CloudWatch logs
-python3 dev/extension-service/run.py <extension> view-logs
-python3 dev/extension-service/run.py <extension> view-logs --follow
-python3 dev/extension-service/run.py <extension> view-logs --hours 24 --filter ERROR
+2. **Build** the Lambda zip (written to `extensions-service/state`)
 
-# Invoke handler on AWS Lambda
-python3 dev/extension-service/run.py <extension> test <handler_name>
-python3 dev/extension-service/run.py <extension> test <handler_name> --payload-file example_payload.json
+  ```bash
+  python3 dev/extensions-service/run.py <env> build
+  # When <env> and extension have different names:
+  python3 dev/extensions-service/run.py <env> build --extension-repo <extension_name>
+  ```
+
+  3. **Deploy** the zip to AWS Lambda
+
+  ```bash
+  python3 dev/extensions-service/run.py <env> deploy deploy \
+    --profile <aws-profile>
+  ```
+
+### ECS + Lambda
+
+Provisions handlers IAM plus ECS cluster, ECR, and S3 results bucket. Uses the default VPC for subnets/SG unless you pass `--vpc` (stage 1 options).
+
+1. **Provision (admin, once)**
+
+  ```bash
+  python3 dev/extensions-service/run.py <env> provision-infra apply \
+    --profile <aws-profile> \
+    --launch-type <ec2|fargate>
+    --github-repo <org>/<handlers-repo> #Optional
+  ```
+
+2. **Build** the Lambda zip and the ECS Docker image (heavy dependencies)
+
+  ```bash
+  python3 dev/extensions-service/run.py <env> build --large
+  python3 dev/extensions-service/run.py <env> build --large --extension-repo <extension_name>
+  python3 dev/extensions-service/run.py <env> build --large --extension-repo <extension_name> --extra-extensions <ext1>,<ext2>
+  ```
+
+3. **Deploy** Lambda (zip) and push the ECS image (ECR + task definition)
+
+  ```bash
+  python3 dev/extensions-service/run.py <env> deploy deploy \
+    --profile <aws-profile>
+
+  python3 dev/extensions-service/run.py <env> deploy push \
+    --profile <aws-profile>
+  ```
+
+---
+
+## Stage 1 — provision-infra (admin, once per environment)
+
+Creates AWS infrastructure and writes manifests that later stages consume.
+
+**Lambda-only (default — omit `--launch-type`):** Lambda IAM policy + role; `provision_manifest.json` with handlers Lambda ARN. No ECS → stage 2 builds a zip only.
+
+**Lambda + ECS (`--launch-type ec2` or `fargate`):** ECR `{ext}-handlers-ecs`, S3 results bucket, ECS cluster, task roles, subnets/SG (default VPC or `--vpc`). EC2 also gets ASG + capacity provider.
+
+Re-running without `--launch-type` on an environment that already has ECS refreshes Lambda IAM and preserves ECS sections (does not tear down ECS).
+
+**Handlers IAM policy:** Always generated at apply time (ECS invoke + S3 handshake). 
+
+```bash
+python3 dev/extensions-service/run.py <env> provision-infra apply \
+  --profile <aws-profile>
 ```
 
-## Examples
+Optional:
+
+| Flag / subcommand | When to use |
+|-------------------|-------------|
+| `--launch-type ec2` | ECS on EC2 (ASG + capacity provider) |
+| `--launch-type fargate` | ECS on Fargate |
+| `--vpc vpc-...` | Non-default VPC (subnets/SG discovered from it) |
+| `--github-repo Org/handlers-repo` | GitHub OIDC for handlers CI → `handlers_github_oidc.json` |
+| `--enable-handlers-staging-role` | Second OIDC role for GitHub Environment `staging` |
+
+**Other commands (optional):**
+
+Export env vars for `launcher/vars.json` and write `state/<env>/lambda_env_export.json`:
 
 ```bash
-python3 dev/extension-service/run.py noma build
-python3 dev/extension-service/run.py noma deploy deploy
-python3 dev/extension-service/run.py exhq setup-iam
-python3 dev/extension-service/run.py noma run-local my_handler example_payload.json
-python3 dev/extension-service/run.py noma view-logs --follow
-python3 dev/extension-service/run.py noma test my_handler
+python3 dev/extensions-service/run.py <env> provision-infra export
 ```
 
-## Per-extension config
+Tear down EC2 capacity only (cluster and IAM kept):
 
-- **`extensions/<name>/installer/ecs_profile.json`** – (optional) ECS deploy intent: `launch_type` (`fargate`|`ec2`), `size`, `task_cpu` / `task_memory`, `network_mode`, `ec2_instance_type` (hint for capacity planning), and ASG defaults by size:
-  - `small`: `min=0`, `desired=0`, `max=1`
-  - `medium`: `min=0`, `desired=1`, `max=2`
-  - `large`: `min=1`, `desired=1`, `max=4`
-  Created with defaults on first `deploy --type ecs` if missing. Update with `run.py <ext> ecs-profile` (merge) or `--force` to reset.
-
-Each extension still keeps in `extensions/<name>/installer/service/`:
-
-- `lambda_config.json` – function name, role, runtime, etc.
-- `<name>-handlers-iam-policy.json` – IAM policy document for `setup-iam`
-- **`ecs_deploy_config.json`** – written by `deploy --type ecs`; the system reads it (and env) for ECS invocations. Includes `launch_type` and `network_mode`. Subnets/security groups are required for Fargate (and EC2 awsvpc); omitted for EC2 bridge/host.
-- **`ecs_environment.json`** – (optional) per-extension env vars for ECS tasks. Same idea as `lambda_config.json`’s `Environment.Variables`: key-value JSON (e.g. `PYTHONPATH`, `DYNAMODB_ENTITY_TABLE`). If present, `deploy --type ecs` merges it into the task definition container; the file is never overwritten by deploy.
-- Optional: `example_payload.json`, `README.md`
-- **`extensions/<name>/package/handlers_config.json`** – handler name → class mapping (used by `lambda_router.py`)
-
-Script logic lives here in `dev/extensions-service/scripts/` and is parameterized by `EXTENSION_NAME` and `WORKSPACE_ROOT` (set by `run.py`). Each extension’s `installer/service/` now contains only config files (no duplicate scripts).
-
-## Optional dependencies and [large-dependencies] (ECS large build)
-
-In each extension's `package/pyproject.toml`: **`[project.dependencies]`** are installed for the Lambda build (kept small). **`[project.optional-dependencies]`** can define a **`large-dependencies`** extra (e.g. TensorFlow, numpy, scikit-learn); those are not installed for Lambda. The ECS large build (`build --large`) runs `pip install .[large-dependencies]`, so only that image gets the heavy libs. Handlers that need TensorFlow or other large deps must list them under `[project.optional-dependencies] large-dependencies`. If the first install fails (e.g. a package needs to compile and gcc is missing), the build retries with `PIP_ONLY_BINARY` for packages listed in **`dev/extensions-service/wheel_libs.json`** (package names only, e.g. `["hdbscan"]`); if both attempts fail, the build stops.
-
-**Note**: for windows, running on WSL:
 ```bash
- sed -i 's/\r$//' dev/extensions-service/scripts/*.sh
+python3 dev/extensions-service/run.py <env> provision-infra destroy \
+  --profile <aws-profile>
 ```
-might be necessary before build and deploy
+
+Delete all provisioned AWS resources and local `state/<env>/`. Use flag `--keep-logs` to Keep CloudWatch log groups when tearing down:
+
+```bash
+python3 dev/extensions-service/run.py <env> provision-infra teardown \
+  --profile <aws-profile> --yes --keep-logs
+```
+
+---
+
+## Stage 2 — deploy (DevOps / CI profile)
+
+Stage 2 has two publish paths: Lambda (zip) and ECS (Docker image). Docker is a build tool in both cases; only the ECS path pushes to ECR.
+
+| Target | Build | Publish to AWS |
+|--------|-------|----------------|
+| Handlers Lambda | `build` | `deploy deploy` / `deploy update` |
+| Handlers ECS| `build` (auto if ECS provisioned) or `build --large` | `deploy push` |
+
+`deploy push` does not deploy Lambda. For Lambda-only environments, stop after `deploy deploy`.
+
+Stage 2 needs `dev/extensions-service/state/<env>/deploy_input.json`. Can be generated by `bootstrap/install.py`, and must have shape as defined in `extensions-service\state\schemas\deploy_input.schema.json`
+
+Optional: `provision_manifest.json` in state supplements deploy push (cluster, launch type). `runtime_profile.json` is for stage 3 (`runtime set-profile`), not deploy push.
+
+### `build` / `deploy build`
+
+`build` always produces the Lambda zip (light image). With ECS provisioned, it also builds the ECS image unless you pass `--no-ecs`.
+
+**`build --large`** builds both artifacts in one run: the light Lambda zip (for `deploy deploy` → AWS Lambda) and the "heavy" Docker image with `[large-dependencies]` (for `deploy push` → ECR → ECS tasks). Use it for Lambda + ECS workflows so you do not need separate build commands.
+
+```bash
+python3 dev/extensions-service/run.py <env> build
+```
+
+**Optional:**
+
+| Flag | When to use |
+|------|-------------|
+| `--extension-repo` | Handler source folder when it differs from `<env>` |
+| `--extra-extensions` | Comma-separated extra extensions to bundle alongside the primary one. Their Python packages, dependencies, and `handlers_config.json` entries are merged into the artifact. |
+| `--large` | Force ECS image build (heavy deps) even before ECS is provisioned, or when you want zip + ECS image together |
+| `--no-ecs` | Lambda zip only, skip ECS image even if `provision_manifest.json` has ECS |
+| `--local` | Lambda zip for `run-local` on arm64 (ECS image stays amd64) |
+
+| Build output | Used by |
+|--------------|---------|
+| `extensions-service/state/<env>/lambda_deployment.zip` | `deploy deploy` / `deploy update` |
+| `<env>-ecs-builder:latest` image | `deploy push` |
+
+### `deploy deploy` / `deploy update` / `deploy undeploy`
+
+Uses `deploy_input.json` and `state/<env>/lambda_deployment.zip`. Subcommands map to `deploy_as_a_service.sh` (creates/updates the `{ext}-handlers` function).
+
+```bash
+python3 dev/extensions-service/run.py <env> deploy deploy \
+  --profile <aws-profile>
+```
+
+**Optional:**
+
+| Flag / subcommand | When to use |
+|-------------------|-------------|
+| `deploy update` | Update code/config on an existing function (preferred in CI) |
+| `deploy deploy --clean` | Delete and recreate the function |
+| `deploy undeploy` | Remove the Lambda function |
+| `--type ecs` | Legacy: build large image + run ECS push in one step (prefer `build --large` + `deploy push`) |
+| `--type default` | Zip Lambda, then ECS if extension config lists ECS handlers |
+
+### `deploy push`
+
+ECS only. Pushes the Docker image to ECR and registers/updates the task definition (`deploy_ecs.sh`). Reads cluster, ECR, bucket, and ECS launch/network mode from `provision_manifest.json` and/or `deploy_input.json` `VARS` (then AWS CLI if needed). Does not use `runtime_profile.json` (stage 3).
+
+```bash
+python3 dev/extensions-service/run.py <env> deploy push \
+  --profile <aws-profile>
+```
+
+### `deploy publish` (optional)
+
+Record a completed ECS release in `release_manifest.json` (no AWS changes; optional bookkeeping for CI or audit):
+
+```bash
+python3 dev/extensions-service/run.py <env> deploy publish --type ecs
+```
+
+`--type` is only a label stored as `last_publish.target` (default `ecs`). It does not choose Fargate vs EC2. 
+
+---
+
+## Stage 3 — runtime-config (tuning, no re-provision)
+
+Adjust compute sizing (Fargate vs EC2, instance type, ASG) without reprovisioning infra. After profile changes, run `export-lambda-env` to refresh values for `launcher/vars.json`.
+
+```bash
+python3 dev/extensions-service/run.py <env> runtime set-profile --medium
+```
+
+**Optional:**
+
+| Flag | When to use |
+|------|-------------|
+| `--large` / `--medium` / … | Preset CPU/memory |
+| `--launch-type ec2` / `fargate` | Launch type |
+| `--network-mode bridge` / `awsvpc` / … | ECS network mode |
+| `--ec2-instance-type m5.2xlarge` | EC2 instance type |
+| `--asg-min-size`, `--asg-desired-capacity`, `--asg-max-size` | ASG sizing |
+| `runtime export-lambda-env` | Refresh `lambda_env_export.json` |
+
+---
+
+## Other commands
+
+| Command | Purpose |
+|---------|---------|
+| `list` | List extensions (`extensions/<name>/package/`) |
+| `setup-iam` | Lambda handlers IAM only (subset of stage 1) |
+| `provision-ecs-capacity` / `undeploy-ecs-capacity` | EC2 ASG capacity without full provision |
+| `deploy publish --type ecs` | Optional: mark release complete in `release_manifest.json` (no AWS) |
+| `run-local <handler>` | Invoke handler locally via Docker |
+| `view-logs` | CloudWatch logs for handlers Lambda |
+| `test <handler>` | Invoke handler on AWS Lambda |
+
+```bash
+python3 dev/extensions-service/run.py <env> run-local <handler_name>
+python3 dev/extensions-service/run.py <env> view-logs --follow
+python3 dev/extensions-service/run.py <env> test <handler_name>
+```
+
+---
+
+## State files
+
+All under `dev/extensions-service/state/<env>/` — gitignored except `state/schemas/`.
+
+| File | Written by | Role |
+|------|-----------|------|
+| `deploy_input.json` | Bootstrap merge (copy in) | **Required for stage 2** — `VARS` / `SECRETS` for deploy and handlers GitHub Environment |
+| `provision_manifest.json` | `provision-infra apply` | Optional; overrides some deploy values when present |
+| `runtime_profile.json` | `provision-infra apply`, `runtime set-profile` | Optional ECS sizing / launch type |
+| `handlers_github_oidc.json` | `provision-infra apply` + `--github-repo` | Handlers OIDC metadata (merged into `deploy_input` at bootstrap) |
+| `release_manifest.json` | `deploy build` / `push` (optional `publish`) | Local audit trail: last build, last push image URI, optional `last_publish` marker |
+| `lambda_deployment.zip` | `build` | Lambda zip artifact for `deploy deploy` / `deploy update` |
+
+| `lambda_env_export.json` | `provision-infra export`, `runtime export-lambda-env` | For `launcher/vars.json` (stage 3) |
+
+---
+
+## Per-extension repo layout
+
+**Platform env vs handler repo:** `<env>` names state and AWS resources. Handler code may live under a different folder; use `build --extension-repo <folder>` when it does (aligned with bootstrap `--extension-specific` for provision).
+
+| Path | Role |
+|------|------|
+| `<folder>/package/` or `extensions/<folder>/package/` | Handler source (`pyproject.toml`, `handlers_config.json`) — selected via `build --extension-repo` |
+| `extensions-service/state/<env>/lambda_deployment.zip` | Build output consumed by deploy |
+| `extensions-service/state/<env>/` | Manifests + deploy input (gitignored except `schemas/`) |
+
+---
+
+## Optional dependencies and `[large-dependencies]`
+
+In `extensions/<name>/package/pyproject.toml`:
+
+- **`[project.dependencies]`** — Lambda zip (keep small)
+- **`[project.optional-dependencies] large-dependencies`** — heavy libs for `build --large` / ECS image only
+
+If `pip install` fails, the build retries with `--only-binary` for packages in `dev/extensions-service/wheel_libs.json`.
+
+---
+
+## Notes
+
+**Handlers Lambda vs launcher backend Lambda:** This service deploys **`{ext}-handlers`** as a zip. The **backend** Lambda and its ECR repo come from **bootstrap → launcher**, not from `deploy push` here.
+
+**`launcher/vars.json` ECS entries** — refresh with `provision-infra export` or `runtime export-lambda-env` after VPC or profile changes.
+
+**Windows / WSL:** if shell scripts fail with `\r` errors:
+
+```bash
+sed -i 's/\r$//' dev/extensions-service/scripts/*.sh
+```
+
+## Deploy flow chart
+
+```mermaid
+flowchart LR
+  subgraph provision_infra [1. provision-infra]
+    P[IAM and optional ECS capacity]
+    OIDC[optional GitHub OIDC roles]
+  end
+
+  subgraph deploy_block [2. deploy]
+    B[build zip / ECS image]
+    U[push ECS / Lambda]
+  end
+
+  subgraph runtime_block [3. runtime]
+    R[ECS profile + env export]
+  end
+
+  provision_infra --> deploy_block --> runtime_block
+
+  P -->|"writes state/"| StateProv[(provision_manifest.json)]
+  P -->|"writes state/"| RunProf[(runtime_profile.json)]
+  P -->|"writes state/"| LambdaExport[(lambda_env_export.json)]
+  OIDC -->|"writes state/"| OidcState[(handlers_github_oidc.json)]
+  B -->|"reads extensions/"| PyToml[(pyproject.toml)]
+  B -->|"reads dev/"| Renglo[(renglo-lib)]
+  B -->|"writes state/"| Release[(release_manifest.json)]
+  B -->|"writes state/"| Zip[(lambda_deployment.zip)]
+  U -->|"reads state/"| StateProv
+  U -->|"reads state/"| DeployIn[(deploy_input.json - created in bootstrap)]
+  U -->|"optional state/"| RunProf
+  U -->|"writes state/"| Release
+  R -->|"reads state/"| StateProv
+  R -->|"reads/writes state/"| RunProf
+  R -->|"writes state/"| LambdaExport
+```

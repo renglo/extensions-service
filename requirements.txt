@@ -1,0 +1,4 @@
+# Required for: run.py test <handler> (invokes Lambda directly via boto3)
+# Not required for: provision-infra apply/teardown, deploy build/push/publish
+# (those operations use the AWS CLI via bash scripts)
+boto3

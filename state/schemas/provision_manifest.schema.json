@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ExtensionServiceProvisionManifest",
+  "type": "object",
+  "required": [
+    "state_version",
+    "extension",
+    "updated_at",
+    "aws_region"
+  ],
+  "properties": {
+    "state_version": { "type": "integer" },
+    "extension": { "type": "string" },
+    "updated_at": { "type": "string" },
+    "aws_region": { "type": "string" },
+    "lambda_only": { "type": "boolean" },
+    "lambda": {
+      "type": "object",
+      "required": ["function_name", "LAMBDA_EXTERNAL_HANDLERS_ARN"],
+      "properties": {
+        "function_name": { "type": "string" },
+        "LAMBDA_EXTERNAL_HANDLERS_ARN": { "type": "string" }
+      }
+    },
+    "ecr": {
+      "type": "object",
+      "required": ["repository", "image_uri"],
+      "properties": {
+        "repository": { "type": "string" },
+        "image_uri": { "type": "string" }
+      }
+    },
+    "ecs": {
+      "type": "object",
+      "required": ["cluster", "task_definition"],
+      "properties": {
+        "cluster": { "type": "string" },
+        "task_definition": { "type": "string" },
+        "launch_type": { "type": "string" },
+        "network_mode": { "type": "string" },
+        "subnets": { "type": "array", "items": { "type": "string" } },
+        "security_groups": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "buckets": {
+      "type": "object",
+      "properties": {
+        "ecs_results_bucket": { "type": "string" }
+      }
+    }
+  }
+}

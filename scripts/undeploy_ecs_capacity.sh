@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# shellcheck source=_common.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_common.sh"
 
 # Remove ECS EC2 capacity resources for one extension cluster:
 # - disassociate capacity provider from cluster
@@ -36,7 +38,12 @@ if aws autoscaling describe-auto-scaling-groups --auto-scaling-group-names "$ECS
 fi
 
 echo "==> Remove capacity provider from cluster (if present)..."
-if aws ecs describe-capacity-providers --capacity-providers "$ECS_CP_NAME" --region "$AWS_REGION" >/dev/null 2>&1; then
+CLUSTER_STATUS=""
+CLUSTER_STATUS=$(aws ecs describe-clusters --clusters "$ECS_CLUSTER" --region "$AWS_REGION" \
+  --query 'clusters[0].status' --output text 2>/dev/null || true)
+if [[ "$CLUSTER_STATUS" != "ACTIVE" ]]; then
+  echo "  Cluster not ACTIVE (${CLUSTER_STATUS:-missing}); skipping detach (idempotent rerun)."
+elif aws ecs describe-capacity-providers --capacity-providers "$ECS_CP_NAME" --region "$AWS_REGION" >/dev/null 2>&1; then
   aws ecs put-cluster-capacity-providers \
     --cluster "$ECS_CLUSTER" \
     --capacity-providers FARGATE FARGATE_SPOT \
