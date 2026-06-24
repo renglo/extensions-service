@@ -322,7 +322,8 @@ class ComputeStack(Construct):
             self,
             "ResultsBucket",
             bucket_name=bucket_name,
-            removal_policy=RemovalPolicy.SNAPSHOT,
+            removal_policy=RemovalPolicy.DESTROY,
+            auto_delete_objects=True,
             block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
             encryption=s3.BucketEncryption.S3_MANAGED,
             lifecycle_rules=[
@@ -489,8 +490,9 @@ class ComputeStack(Construct):
         )
 
         # --- EC2 capacity (only when compute_type == "ec2") ---
+        ec2_network_outputs: dict[str, str] = {}
         if compute_type == "ec2":
-            self._provision_ec2_capacity(
+            ec2_network_outputs = self._provision_ec2_capacity(
                 env_name=env_name,
                 cluster_name=cluster_name,
                 instance_type=ec2_instance_type,
@@ -522,6 +524,7 @@ class ComputeStack(Construct):
             "HandlersLambdaLogGroupName": handlers_lambda_log_group.log_group_name,
             "HandlersLambdaFunctionName": handlers_fn.function_name,  # type: ignore[arg-type]
             "HandlersTaskFamily": task_family,
+            **ec2_network_outputs,
         }
 
         self._provision_handlers_oidc(
@@ -724,30 +727,24 @@ class ComputeStack(Construct):
         ec2_min: int,
         ec2_desired: int,
         ec2_max: int,
-    ) -> None:
+    ) -> dict[str, str]:
         """Add EC2 ASG + ECS capacity provider to the cluster.
 
-        VPC and subnets are CloudFormation parameters so synth works offline and
-        the customer picks their default VPC (or any VPC) at deploy time.
+        This creates a dedicated VPC for handlers compute so deployment is
+        self-contained and does not require passing network parameters.
         """
-
-        vpc_id_param = CfnParameter(
+        vpc = ec2.Vpc(
             self,
-            "VpcId",
-            type="AWS::EC2::VPC::Id",
-            description=(
-                "VPC for the ECS EC2 Auto Scaling group. "
-                "Select your account default VPC or any VPC that contains SubnetIds."
-            ),
-        )
-        subnet_ids_param = CfnParameter(
-            self,
-            "SubnetIds",
-            type="List<AWS::EC2::Subnet::Id>",
-            description=(
-                "Subnets for the ECS EC2 Auto Scaling group (one or more, in the chosen VPC). "
-                "For the default VPC, pick its subnets across availability zones."
-            ),
+            "HandlersComputeVpc",
+            nat_gateways=0,
+            max_azs=2,
+            subnet_configuration=[
+                ec2.SubnetConfiguration(
+                    name="handlers-public",
+                    subnet_type=ec2.SubnetType.PUBLIC,
+                    cidr_mask=24,
+                )
+            ],
         )
         ecs_ami_param = CfnParameter(
             self,
@@ -779,7 +776,7 @@ class ComputeStack(Construct):
             self,
             "HandlersAsgInstanceSecurityGroup",
             group_description=f"{env_name} handlers ECS EC2 instances",
-            vpc_id=vpc_id_param.value_as_string,
+            vpc_id=vpc.vpc_id,
         )
 
         asg_name = f"{env_name}-handlers-ecs-asg"
@@ -822,7 +819,7 @@ class ComputeStack(Construct):
                 launch_template_id=launch_template.ref,
                 version=launch_template.attr_latest_version_number,
             ),
-            vpc_zone_identifier=subnet_ids_param.value_as_list,
+            vpc_zone_identifier=[subnet.subnet_id for subnet in vpc.public_subnets],
             new_instances_protected_from_scale_in=True,
             tags=[
                 autoscaling.CfnAutoScalingGroup.TagPropertyProperty(
@@ -864,3 +861,11 @@ class ComputeStack(Construct):
 
         cfn_asg.node.add_dependency(launch_template)
         capacity_provider.node.add_dependency(cfn_asg)
+
+        return {
+            "HandlersComputeVpcId": vpc.vpc_id,
+            "HandlersComputeSubnetIds": ",".join(
+                subnet.subnet_id for subnet in vpc.public_subnets
+            ),
+            "HandlersComputeSecurityGroupId": security_group.ref,
+        }
