@@ -8,7 +8,19 @@ compute_type values: "lambda_only" | "fargate" | "ec2"
 
 from __future__ import annotations
 
-from aws_cdk import CfnDeletionPolicy, CfnOutput, CfnParameter, CfnTag, Duration, Fn, RemovalPolicy
+from typing import Any
+
+from aws_cdk import (
+    CfnCondition,
+    CfnDeletionPolicy,
+    CfnOutput,
+    CfnParameter,
+    CfnResource,
+    CfnTag,
+    Duration,
+    Fn,
+    RemovalPolicy,
+)
 from aws_cdk import aws_autoscaling as autoscaling
 from aws_cdk import aws_ec2 as ec2
 from aws_cdk import aws_ecr as ecr
@@ -21,6 +33,19 @@ from constructs import Construct
 
 DESCRIPTION = "Reglo Deployment"
 GITHUB_OIDC_PROVIDER_ARN_SUFFIX = "token.actions.githubusercontent.com"
+
+_HANDLERS_NETWORK_MODE_CREATE = "create"
+_HANDLERS_NETWORK_MODE_EXISTING = "existing"
+HANDLERS_NETWORK_MODE_CREATE = _HANDLERS_NETWORK_MODE_CREATE
+HANDLERS_NETWORK_MODE_EXISTING = _HANDLERS_NETWORK_MODE_EXISTING
+
+
+def _apply_cfn_condition_to_construct_tree(scope: Construct, condition: CfnCondition) -> None:
+    """Apply a CloudFormation condition to every L1 child under scope."""
+    for construct in scope.node.find_all():
+        cfn = construct.node.default_child
+        if isinstance(cfn, CfnResource):
+            cfn.cfn_options.condition = condition
 
 
 def handlers_lambda_function_name(env_name: str) -> str:
@@ -283,6 +308,7 @@ class ComputeStack(Construct):
         github_handlers_repo: str = "",
         enable_staging: bool = True,
         tenant_policy: iam.IManagedPolicy | None = None,
+        handlers_network_params: dict[str, Any] | None = None,
         **kwargs,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
@@ -492,6 +518,8 @@ class ComputeStack(Construct):
         # --- EC2 capacity (only when compute_type == "ec2") ---
         ec2_network_outputs: dict[str, str] = {}
         if compute_type == "ec2":
+            if handlers_network_params is None:
+                raise ValueError("handlers_network_params is required when compute_type is ec2")
             ec2_network_outputs = self._provision_ec2_capacity(
                 env_name=env_name,
                 cluster_name=cluster_name,
@@ -499,6 +527,7 @@ class ComputeStack(Construct):
                 ec2_min=ec2_min_instances,
                 ec2_desired=ec2_desired_instances,
                 ec2_max=ec2_max_instances,
+                handlers_network_params=handlers_network_params,
             )
 
         # --- Outputs ---
@@ -727,12 +756,26 @@ class ComputeStack(Construct):
         ec2_min: int,
         ec2_desired: int,
         ec2_max: int,
+        handlers_network_params: dict[str, Any],
     ) -> dict[str, str]:
         """Add EC2 ASG + ECS capacity provider to the cluster.
 
-        This creates a dedicated VPC for handlers compute so deployment is
-        self-contained and does not require passing network parameters.
+        Network layout is selected at deploy time via stack-level CloudFormation
+        parameters (see stack_b.py). create provisions dedicated VPC/subnets;
+        existing uses customer VPC/subnets and still creates a dedicated SG.
         """
+        create_dedicated_network = handlers_network_params["create_dedicated_network"]
+        use_existing_network = handlers_network_params["use_existing_network"]
+        existing_vpc_id = handlers_network_params["existing_vpc_id"]
+        existing_subnet_ids = handlers_network_params["existing_subnet_ids"]
+
+        ecs_ami_param = CfnParameter(
+            self,
+            "EcsOptimizedAmi",
+            type="AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>",
+            default="/aws/service/ecs/optimized-ami/amazon-linux-2/recommended/image_id",
+        )
+
         vpc = ec2.Vpc(
             self,
             "HandlersComputeVpc",
@@ -746,12 +789,15 @@ class ComputeStack(Construct):
                 )
             ],
         )
-        ecs_ami_param = CfnParameter(
-            self,
-            "EcsOptimizedAmi",
-            type="AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>",
-            default="/aws/service/ecs/optimized-ami/amazon-linux-2/recommended/image_id",
+        _apply_cfn_condition_to_construct_tree(vpc, create_dedicated_network)
+
+        dedicated_subnet_ids = Fn.join(",", [subnet.subnet_id for subnet in vpc.public_subnets])
+        vpc_id_for_resources = Fn.condition_if(
+            create_dedicated_network.logical_id,
+            vpc.vpc_id,
+            existing_vpc_id.value_as_string,
         )
+        dedicated_subnet_id_list = [subnet.subnet_id for subnet in vpc.public_subnets]
 
         instance_role = iam.Role(
             self,
@@ -772,11 +818,26 @@ class ComputeStack(Construct):
             roles=[instance_role.role_name],
         )
 
-        security_group = ec2.CfnSecurityGroup(
+        security_group_create = ec2.CfnSecurityGroup(
             self,
-            "HandlersAsgInstanceSecurityGroup",
+            "HandlersAsgInstanceSecurityGroupCreate",
             group_description=f"{env_name} handlers ECS EC2 instances",
             vpc_id=vpc.vpc_id,
+        )
+        security_group_create.cfn_options.condition = create_dedicated_network
+
+        security_group_existing = ec2.CfnSecurityGroup(
+            self,
+            "HandlersAsgInstanceSecurityGroupExisting",
+            group_description=f"{env_name} handlers ECS EC2 instances",
+            vpc_id=existing_vpc_id.value_as_string,
+        )
+        security_group_existing.cfn_options.condition = use_existing_network
+
+        security_group_id = Fn.condition_if(
+            create_dedicated_network.logical_id,
+            security_group_create.ref,
+            security_group_existing.ref,
         )
 
         asg_name = f"{env_name}-handlers-ecs-asg"
@@ -787,17 +848,14 @@ class ComputeStack(Construct):
             f"#!/bin/bash\necho ECS_CLUSTER={cluster_name} >> /etc/ecs/ecs.config\n"
         )
 
-        launch_template = ec2.CfnLaunchTemplate(
-            self,
-            "HandlersAsgLaunchTemplate",
-            launch_template_name=f"{env_name}-handlers-ecs-lt",
-            launch_template_data=ec2.CfnLaunchTemplate.LaunchTemplateDataProperty(
+        def _launch_template_data(security_group_ref: str) -> ec2.CfnLaunchTemplate.LaunchTemplateDataProperty:
+            return ec2.CfnLaunchTemplate.LaunchTemplateDataProperty(
                 image_id=ecs_ami_param.value_as_string,
                 instance_type=instance_type,
                 iam_instance_profile=ec2.CfnLaunchTemplate.IamInstanceProfileProperty(
                     arn=instance_profile.attr_arn,
                 ),
-                security_group_ids=[security_group.ref],
+                security_group_ids=[security_group_ref],
                 user_data=ecs_user_data,
                 tag_specifications=[
                     ec2.CfnLaunchTemplate.TagSpecificationProperty(
@@ -805,21 +863,36 @@ class ComputeStack(Construct):
                         tags=[CfnTag(key="Name", value=asg_name)],
                     ),
                 ],
-            ),
-        )
+            )
 
-        cfn_asg = autoscaling.CfnAutoScalingGroup(
+        launch_template_create = ec2.CfnLaunchTemplate(
             self,
-            "HandlersAsg",
+            "HandlersAsgLaunchTemplateCreate",
+            launch_template_name=f"{env_name}-handlers-ecs-lt",
+            launch_template_data=_launch_template_data(security_group_create.ref),
+        )
+        launch_template_create.cfn_options.condition = create_dedicated_network
+
+        launch_template_existing = ec2.CfnLaunchTemplate(
+            self,
+            "HandlersAsgLaunchTemplateExisting",
+            launch_template_name=f"{env_name}-handlers-ecs-lt",
+            launch_template_data=_launch_template_data(security_group_existing.ref),
+        )
+        launch_template_existing.cfn_options.condition = use_existing_network
+
+        cfn_asg_create = autoscaling.CfnAutoScalingGroup(
+            self,
+            "HandlersAsgCreate",
             auto_scaling_group_name=asg_name,
             min_size=str(ec2_min),
             max_size=str(ec2_max),
             desired_capacity=str(ec2_desired),
             launch_template=autoscaling.CfnAutoScalingGroup.LaunchTemplateSpecificationProperty(
-                launch_template_id=launch_template.ref,
-                version=launch_template.attr_latest_version_number,
+                launch_template_id=launch_template_create.ref,
+                version=launch_template_create.attr_latest_version_number,
             ),
-            vpc_zone_identifier=[subnet.subnet_id for subnet in vpc.public_subnets],
+            vpc_zone_identifier=dedicated_subnet_id_list,
             new_instances_protected_from_scale_in=True,
             tags=[
                 autoscaling.CfnAutoScalingGroup.TagPropertyProperty(
@@ -829,13 +902,37 @@ class ComputeStack(Construct):
                 )
             ],
         )
+        cfn_asg_create.cfn_options.condition = create_dedicated_network
 
-        capacity_provider = ecs.CfnCapacityProvider(
+        cfn_asg_existing = autoscaling.CfnAutoScalingGroup(
             self,
-            "HandlersCapacityProvider",
+            "HandlersAsgExisting",
+            auto_scaling_group_name=asg_name,
+            min_size=str(ec2_min),
+            max_size=str(ec2_max),
+            desired_capacity=str(ec2_desired),
+            launch_template=autoscaling.CfnAutoScalingGroup.LaunchTemplateSpecificationProperty(
+                launch_template_id=launch_template_existing.ref,
+                version=launch_template_existing.attr_latest_version_number,
+            ),
+            vpc_zone_identifier=existing_subnet_ids.value_as_list,
+            new_instances_protected_from_scale_in=True,
+            tags=[
+                autoscaling.CfnAutoScalingGroup.TagPropertyProperty(
+                    key="Name",
+                    value=asg_name,
+                    propagate_at_launch=False,
+                )
+            ],
+        )
+        cfn_asg_existing.cfn_options.condition = use_existing_network
+
+        capacity_provider_create = ecs.CfnCapacityProvider(
+            self,
+            "HandlersCapacityProviderCreate",
             name=cp_name,
             auto_scaling_group_provider=ecs.CfnCapacityProvider.AutoScalingGroupProviderProperty(
-                auto_scaling_group_arn=cfn_asg.ref,
+                auto_scaling_group_arn=cfn_asg_create.ref,
                 managed_scaling=ecs.CfnCapacityProvider.ManagedScalingProperty(
                     status="ENABLED",
                     target_capacity=100,
@@ -843,10 +940,26 @@ class ComputeStack(Construct):
                 managed_termination_protection="ENABLED",
             ),
         )
+        capacity_provider_create.cfn_options.condition = create_dedicated_network
 
-        cluster_cp_associations = ecs.CfnClusterCapacityProviderAssociations(
+        capacity_provider_existing = ecs.CfnCapacityProvider(
             self,
-            "HandlersClusterCapacityProviders",
+            "HandlersCapacityProviderExisting",
+            name=cp_name,
+            auto_scaling_group_provider=ecs.CfnCapacityProvider.AutoScalingGroupProviderProperty(
+                auto_scaling_group_arn=cfn_asg_existing.ref,
+                managed_scaling=ecs.CfnCapacityProvider.ManagedScalingProperty(
+                    status="ENABLED",
+                    target_capacity=100,
+                ),
+                managed_termination_protection="ENABLED",
+            ),
+        )
+        capacity_provider_existing.cfn_options.condition = use_existing_network
+
+        cluster_cp_associations_create = ecs.CfnClusterCapacityProviderAssociations(
+            self,
+            "HandlersClusterCapacityProvidersCreate",
             cluster=cluster_name,
             capacity_providers=[cp_name],
             default_capacity_provider_strategy=[
@@ -857,15 +970,36 @@ class ComputeStack(Construct):
                 )
             ],
         )
-        cluster_cp_associations.add_dependency(capacity_provider)
+        cluster_cp_associations_create.cfn_options.condition = create_dedicated_network
+        cluster_cp_associations_create.add_dependency(capacity_provider_create)
 
-        cfn_asg.node.add_dependency(launch_template)
-        capacity_provider.node.add_dependency(cfn_asg)
+        cluster_cp_associations_existing = ecs.CfnClusterCapacityProviderAssociations(
+            self,
+            "HandlersClusterCapacityProvidersExisting",
+            cluster=cluster_name,
+            capacity_providers=[cp_name],
+            default_capacity_provider_strategy=[
+                ecs.CfnClusterCapacityProviderAssociations.CapacityProviderStrategyProperty(
+                    capacity_provider=cp_name,
+                    weight=1,
+                    base=0,
+                )
+            ],
+        )
+        cluster_cp_associations_existing.cfn_options.condition = use_existing_network
+        cluster_cp_associations_existing.add_dependency(capacity_provider_existing)
+
+        cfn_asg_create.node.add_dependency(launch_template_create)
+        cfn_asg_existing.node.add_dependency(launch_template_existing)
+        capacity_provider_create.node.add_dependency(cfn_asg_create)
+        capacity_provider_existing.node.add_dependency(cfn_asg_existing)
 
         return {
-            "HandlersComputeVpcId": vpc.vpc_id,
-            "HandlersComputeSubnetIds": ",".join(
-                subnet.subnet_id for subnet in vpc.public_subnets
+            "HandlersComputeVpcId": vpc_id_for_resources,
+            "HandlersComputeSubnetIds": Fn.condition_if(
+                create_dedicated_network.logical_id,
+                dedicated_subnet_ids,
+                Fn.join(",", existing_subnet_ids.value_as_list),
             ),
-            "HandlersComputeSecurityGroupId": security_group.ref,
+            "HandlersComputeSecurityGroupId": security_group_id,
         }
