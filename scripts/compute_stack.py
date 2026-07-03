@@ -271,6 +271,16 @@ def _handlers_oidc_policy(
                 actions=["iam:GetRole", "iam:PassRole"],
                 resources=[handlers_role_arn],
             ),
+            iam.PolicyStatement(
+                sid="SsmReadDeployInput",
+                actions=["ssm:GetParameter", "ssm:GetParameters"],
+                resources=[
+                    f"arn:aws:ssm:{region}:{account}:parameter/{env_name}/bootstrap/deploy-input",
+                    f"arn:aws:ssm:{region}:{account}:parameter/{env_name}/bootstrap/ecs-vpc",
+                    f"arn:aws:ssm:{region}:{account}:parameter/{env_name}/bootstrap/ecs-subnets",
+                    f"arn:aws:ssm:{region}:{account}:parameter/{env_name}/bootstrap/ecs-security-groups",
+                ],
+            ),
         ]
     )
 
