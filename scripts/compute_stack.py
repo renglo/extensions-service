@@ -41,8 +41,17 @@ HANDLERS_NETWORK_MODE_EXISTING = _HANDLERS_NETWORK_MODE_EXISTING
 
 
 def _apply_cfn_condition_to_construct_tree(scope: Construct, condition: CfnCondition) -> None:
-    """Apply a CloudFormation condition to every L1 child under scope."""
+    """Apply a CloudFormation condition to every L1 resource under scope.
+
+    L2 constructs (e.g. ec2.Vpc) expose their primary resource via default_child.
+    Nested L1s (RouteTable, IGW, VPCGatewayAttachment, …) are CfnResource nodes
+    themselves and have no default_child — both shapes must be conditioned or
+    HandlersNetworkMode=existing leaves unconditional Refs to the dedicated VPC.
+    """
     for construct in scope.node.find_all():
+        if isinstance(construct, CfnResource):
+            construct.cfn_options.condition = condition
+            continue
         cfn = construct.node.default_child
         if isinstance(cfn, CfnResource):
             cfn.cfn_options.condition = condition
@@ -1004,12 +1013,28 @@ class ComputeStack(Construct):
         capacity_provider_create.node.add_dependency(cfn_asg_create)
         capacity_provider_existing.node.add_dependency(cfn_asg_existing)
 
+        subnet_ids_existing = Fn.join(",", existing_subnet_ids.value_as_list)
+
+        # Branch-specific values for SSM (BootstrapConfig). Do NOT fold these into a
+        # single Fn::If on an always-created AWS::SSM::Parameter — the SSM resource
+        # provider fails PutParameter when the unused branch Refs conditional resources.
+        self.ecs_network_ssm = {
+            "create_condition": create_dedicated_network,
+            "existing_condition": use_existing_network,
+            "vpc_create": vpc.vpc_id,
+            "vpc_existing": existing_vpc_id.value_as_string,
+            "subnets_create": dedicated_subnet_ids,
+            "subnets_existing": subnet_ids_existing,
+            "security_groups_create": security_group_create.ref,
+            "security_groups_existing": security_group_existing.ref,
+        }
+
         return {
             "HandlersComputeVpcId": vpc_id_for_resources,
             "HandlersComputeSubnetIds": Fn.condition_if(
                 create_dedicated_network.logical_id,
                 dedicated_subnet_ids,
-                Fn.join(",", existing_subnet_ids.value_as_list),
+                subnet_ids_existing,
             ),
             "HandlersComputeSecurityGroupId": security_group_id,
         }
