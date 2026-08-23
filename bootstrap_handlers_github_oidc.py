@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -17,7 +18,11 @@ OIDC_URL = "https://token.actions.githubusercontent.com"
 OIDC_THUMBPRINT = "6938fd4d98bab03faadb97b34396831e3780aea1"
 
 _UTILS_DIR = Path(__file__).resolve().parent / "utils"
-_TRUST_TEMPLATE = _UTILS_DIR / "github-handlers-oidc-trust.template.json"
+_SCRIPTS_DIR = Path(__file__).resolve().parent / "scripts"
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+from github_oidc import github_environment_sub_claims, github_oidc_trust_policy  # noqa: E402
+
 _POLICY_TEMPLATE = _UTILS_DIR / "github-handlers-actions-policy.template.json"
 
 
@@ -28,6 +33,8 @@ class HandlersBootstrapConfig:
     aws_region: str
     github_repo: str
     enable_staging_role: bool = False
+    github_owner_id: str | None = None
+    github_repo_id: str | None = None
     ecs_results_bucket: str | None = None
     apply_changes: bool = True
     state_out_path: Path | None = None
@@ -149,13 +156,14 @@ def run(config: HandlersBootstrapConfig) -> dict[str, Any]:
 
     role_name_prod = handlers_role_name(config.extension, "production")
     policy_name_prod = handlers_policy_name(config.extension, "production")
-    trust_prod = _render_template(
-        _TRUST_TEMPLATE,
-        {
-            "OIDC_PROVIDER_ARN": oidc_provider_arn,
-            "GITHUB_REPO": config.github_repo,
-            "GITHUB_ENVIRONMENT": "production",
-        },
+    trust_prod = github_oidc_trust_policy(
+        oidc_provider_arn,
+        github_environment_sub_claims(
+            config.github_repo,
+            "production",
+            owner_id=config.github_owner_id,
+            repo_id=config.github_repo_id,
+        ),
     )
     role_arn_production = _ensure_role_and_policy(
         iam=iam,
@@ -173,13 +181,14 @@ def run(config: HandlersBootstrapConfig) -> dict[str, Any]:
     if config.enable_staging_role:
         role_name_staging = handlers_role_name(config.extension, "staging")
         policy_name_staging = handlers_policy_name(config.extension, "staging")
-        trust_staging = _render_template(
-            _TRUST_TEMPLATE,
-            {
-                "OIDC_PROVIDER_ARN": oidc_provider_arn,
-                "GITHUB_REPO": config.github_repo,
-                "GITHUB_ENVIRONMENT": "staging",
-            },
+        trust_staging = github_oidc_trust_policy(
+            oidc_provider_arn,
+            github_environment_sub_claims(
+                config.github_repo,
+                "staging",
+                owner_id=config.github_owner_id,
+                repo_id=config.github_repo_id,
+            ),
         )
         role_arn_staging = _ensure_role_and_policy(
             iam=iam,
