@@ -31,6 +31,8 @@ from aws_cdk import aws_logs as logs
 from aws_cdk import aws_s3 as s3
 from constructs import Construct
 
+from github_oidc import github_environment_sub_claims
+
 DESCRIPTION = "Reglo Deployment"
 GITHUB_OIDC_PROVIDER_ARN_SUFFIX = "token.actions.githubusercontent.com"
 
@@ -326,6 +328,8 @@ class ComputeStack(Construct):
         network_mode: str = "awsvpc",
         github_handlers_repo: str = "",
         github_handlers_oidc_sub_repo: str = "",
+        github_handlers_owner_id: str | None = None,
+        github_handlers_repo_id: str | None = None,
         enable_staging: bool = True,
         tenant_policy: iam.IManagedPolicy | None = None,
         handlers_network_params: dict[str, Any] | None = None,
@@ -353,8 +357,9 @@ class ComputeStack(Construct):
                 aws_account=aws_account,
                 aws_region=aws_region,
                 github_handlers_repo=github_handlers_repo,
-                github_handlers_oidc_sub_repo=github_handlers_oidc_sub_repo
-                or github_handlers_repo,
+                github_handlers_oidc_sub_repo=github_handlers_oidc_sub_repo,
+                github_handlers_owner_id=github_handlers_owner_id,
+                github_handlers_repo_id=github_handlers_repo_id,
                 enable_staging=enable_staging,
                 ecs_results_bucket=results_bucket_name,
             )
@@ -583,8 +588,9 @@ class ComputeStack(Construct):
             aws_account=aws_account,
             aws_region=aws_region,
             github_handlers_repo=github_handlers_repo,
-            github_handlers_oidc_sub_repo=github_handlers_oidc_sub_repo
-            or github_handlers_repo,
+            github_handlers_oidc_sub_repo=github_handlers_oidc_sub_repo,
+            github_handlers_owner_id=github_handlers_owner_id,
+            github_handlers_repo_id=github_handlers_repo_id,
             enable_staging=enable_staging,
             ecs_results_bucket=bucket_name,
         )
@@ -597,6 +603,8 @@ class ComputeStack(Construct):
         aws_region: str,
         github_handlers_repo: str,
         github_handlers_oidc_sub_repo: str = "",
+        github_handlers_owner_id: str | None = None,
+        github_handlers_repo_id: str | None = None,
         enable_staging: bool,
         ecs_results_bucket: str,
     ) -> None:
@@ -630,9 +638,12 @@ class ComputeStack(Construct):
                             "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
                         },
                         "StringLike": {
-                            "token.actions.githubusercontent.com:sub": (
-                                f"repo:{oidc_sub_repo}:environment:{stage}"
-                            )
+                            "token.actions.githubusercontent.com:sub": github_environment_sub_claims(
+                                oidc_sub_repo,
+                                stage,
+                                owner_id=github_handlers_owner_id,
+                                repo_id=github_handlers_repo_id,
+                            ),
                         },
                     },
                 ),
