@@ -316,6 +316,7 @@ class ComputeStack(Construct):
         task_size: str = "medium",
         network_mode: str = "awsvpc",
         github_handlers_repo: str = "",
+        github_handlers_oidc_sub_repo: str = "",
         enable_staging: bool = True,
         tenant_policy: iam.IManagedPolicy | None = None,
         handlers_network_params: dict[str, Any] | None = None,
@@ -343,6 +344,8 @@ class ComputeStack(Construct):
                 aws_account=aws_account,
                 aws_region=aws_region,
                 github_handlers_repo=github_handlers_repo,
+                github_handlers_oidc_sub_repo=github_handlers_oidc_sub_repo
+                or github_handlers_repo,
                 enable_staging=enable_staging,
                 ecs_results_bucket=results_bucket_name,
             )
@@ -571,6 +574,8 @@ class ComputeStack(Construct):
             aws_account=aws_account,
             aws_region=aws_region,
             github_handlers_repo=github_handlers_repo,
+            github_handlers_oidc_sub_repo=github_handlers_oidc_sub_repo
+            or github_handlers_repo,
             enable_staging=enable_staging,
             ecs_results_bucket=bucket_name,
         )
@@ -582,11 +587,13 @@ class ComputeStack(Construct):
         aws_account: str,
         aws_region: str,
         github_handlers_repo: str,
+        github_handlers_oidc_sub_repo: str = "",
         enable_staging: bool,
         ecs_results_bucket: str,
     ) -> None:
         if not github_handlers_repo.strip():
             return
+        oidc_sub_repo = (github_handlers_oidc_sub_repo or github_handlers_repo).strip()
 
         oidc_provider = iam.OpenIdConnectProvider.from_open_id_connect_provider_arn(
             self,
@@ -615,7 +622,7 @@ class ComputeStack(Construct):
                         },
                         "StringLike": {
                             "token.actions.githubusercontent.com:sub": (
-                                f"repo:{github_handlers_repo}:environment:{stage}"
+                                f"repo:{oidc_sub_repo}:environment:{stage}"
                             )
                         },
                     },
