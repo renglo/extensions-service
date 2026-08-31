@@ -18,7 +18,15 @@ def merge_script_env(extra: dict[str, str] | None = None) -> dict[str, str]:
 
 
 def get_workspace_root() -> Path:
-    """Repo/workspace root (parent of top-level dirs like extensions/, dev/). Three levels above lib.py in .../extensions-service/."""
+    """Repo/workspace root (parent of top-level dirs like extensions/, dev/).
+
+    Default is three levels above lib.py (``.../extensions-service/`` → repo root).
+    ``WORKSPACE_ROOT`` overrides that so compose / CI can point the build at an
+    isolated tree of unpublished packages without copying this service.
+    """
+    override = os.environ.get("WORKSPACE_ROOT", "").strip()
+    if override:
+        return Path(override).expanduser().resolve()
     return Path(__file__).resolve().parent.parent.parent
 
 
@@ -132,7 +140,7 @@ def get_package_dir(extension: str, workspace_root: Path | None = None) -> Path:
 
 
 def get_env_state_dir(env: str, workspace_root: Path | None = None) -> Path:
-    """Per-env state directory: extensions-service/state/<env>/ (build artifacts + manifests)."""
+    """Per-env state: clone ``state/<env>/``, or ``<WORKSPACE_ROOT>/dev/extensions-service/state/<env>/``."""
     from state_store import get_state_paths
 
     return get_state_paths(env, workspace_root).state_dir
