@@ -57,6 +57,93 @@ if [[ "$ACTION" != "deploy" && "$ACTION" != "update" && "$ACTION" != "undeploy" 
   exit 1
 fi
 
+# AWS Lambda direct zip upload limit (compressed). Larger packages go via S3.
+LAMBDA_DIRECT_UPLOAD_MAX_BYTES="${LAMBDA_DIRECT_UPLOAD_MAX_BYTES:-52428800}"
+
+_resolve_deploy_input_path() {
+  if [[ -n "${DEPLOY_INPUT_FILE:-}" && -f "${DEPLOY_INPUT_FILE}" ]]; then
+    echo "$DEPLOY_INPUT_FILE"
+    return 0
+  fi
+  if [[ -f "$SERVICE_ROOT/state/${EXTENSION_NAME}/deploy_input.json" ]]; then
+    echo "$SERVICE_ROOT/state/${EXTENSION_NAME}/deploy_input.json"
+  fi
+}
+
+_resolve_s3_deploy_bucket() {
+  if [[ -n "${LAMBDA_DEPLOY_S3_BUCKET:-}" ]]; then
+    echo "$LAMBDA_DEPLOY_S3_BUCKET"
+    return 0
+  fi
+  local deploy_input
+  deploy_input="$(_resolve_deploy_input_path)"
+  [[ -z "$deploy_input" ]] && return 0
+  python3 -c "
+import json, sys
+with open(sys.argv[1], encoding='utf-8') as f:
+    data = json.load(f)
+print((data.get('VARS') or {}).get('S3_BUCKET_NAME', '').strip())
+" "$deploy_input" 2>/dev/null || true
+}
+
+# create-function | update-function-code
+_apply_lambda_function_code() {
+  local aws_subcommand="$1"
+  local zip_path="$2"
+  local zip_bytes zip_human bucket s3_key
+
+  zip_bytes=$(python3 -c "import os; print(os.path.getsize('${zip_path}'))")
+  zip_human=$(du -h "$zip_path" | cut -f1)
+  echo "==> Lambda package: ${zip_path} (${zip_human}, ${zip_bytes} bytes)"
+
+  if (( zip_bytes <= LAMBDA_DIRECT_UPLOAD_MAX_BYTES )) && [[ "${LAMBDA_FORCE_S3_UPLOAD:-0}" != "1" ]]; then
+    echo "==> Uploading via direct zip-file"
+    if [[ "$aws_subcommand" == "create-function" ]]; then
+      aws lambda create-function \
+        --function-name "$FUNCTION_NAME" \
+        --region "$AWS_REGION" \
+        --zip-file "fileb://${zip_path}" \
+        --cli-input-json "file://$TEMP_CONFIG" \
+        --no-cli-pager
+    else
+      aws lambda update-function-code \
+        --function-name "$FUNCTION_NAME" \
+        --region "$AWS_REGION" \
+        --zip-file "fileb://${zip_path}" \
+        --no-cli-pager
+    fi
+    return $?
+  fi
+
+  bucket="$(_resolve_s3_deploy_bucket)"
+  if [[ -z "$bucket" ]]; then
+    echo "ERROR: Package is ${zip_bytes} bytes (> ${LAMBDA_DIRECT_UPLOAD_MAX_BYTES} direct upload limit)." >&2
+    echo "       Set VARS.S3_BUCKET_NAME in deploy_input.json (or LAMBDA_DEPLOY_S3_BUCKET)." >&2
+    return 1
+  fi
+
+  s3_key="lambda-deployments/${FUNCTION_NAME}/$(date -u +%Y%m%dT%H%M%SZ)-lambda_deployment.zip"
+  echo "==> Package exceeds direct upload limit; uploading to s3://${bucket}/${s3_key}"
+  aws s3 cp "$zip_path" "s3://${bucket}/${s3_key}" --region "$AWS_REGION" --no-cli-pager
+
+  if [[ "$aws_subcommand" == "create-function" ]]; then
+    aws lambda create-function \
+      --function-name "$FUNCTION_NAME" \
+      --region "$AWS_REGION" \
+      --s3-bucket "$bucket" \
+      --s3-key "$s3_key" \
+      --cli-input-json "file://$TEMP_CONFIG" \
+      --no-cli-pager
+  else
+    aws lambda update-function-code \
+      --function-name "$FUNCTION_NAME" \
+      --region "$AWS_REGION" \
+      --s3-bucket "$bucket" \
+      --s3-key "$s3_key" \
+      --no-cli-pager
+  fi
+}
+
 # Wait until Lambda code/config update completes (avoids ResourceConflict on config update).
 wait_for_lambda_updated() {
   local function_name="$1"
@@ -170,18 +257,9 @@ if [[ "$ACTION" == "deploy" ]]; then
       sleep 1
     done
   fi
-  aws lambda create-function \
-    --function-name "$FUNCTION_NAME" \
-    --region "$AWS_REGION" \
-    --zip-file "fileb://$DEPLOYMENT_ZIP" \
-    --cli-input-json "file://$TEMP_CONFIG" \
-    --no-cli-pager || { rm -f "$TEMP_CONFIG"; exit 1; }
+  _apply_lambda_function_code create-function "$DEPLOYMENT_ZIP" || { rm -f "$TEMP_CONFIG"; exit 1; }
 else
-  aws lambda update-function-code \
-    --function-name "$FUNCTION_NAME" \
-    --region "$AWS_REGION" \
-    --zip-file "fileb://$DEPLOYMENT_ZIP" \
-    --no-cli-pager || { rm -f "$TEMP_CONFIG"; exit 1; }
+  _apply_lambda_function_code update-function-code "$DEPLOYMENT_ZIP" || { rm -f "$TEMP_CONFIG"; exit 1; }
   wait_for_lambda_updated "$FUNCTION_NAME" "$AWS_REGION" || { rm -f "$TEMP_CONFIG"; exit 1; }
   python3 -c "
 import json
