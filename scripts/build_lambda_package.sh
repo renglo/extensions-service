@@ -31,23 +31,31 @@ if [[ -n "$EXTRA_EXTENSIONS" ]]; then
   done
 fi
 
+WORKSPACE_ROOT="$(cd "$WORKSPACE_ROOT" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SOURCE_PACKAGE_DIR="$WORKSPACE_ROOT/$DOCKER_SOURCE_COPY_PATH"
+SOURCE_PACKAGE_DIR="${SOURCE_PACKAGE_DIR%/}"
+SERVICE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# Docker paths for every extension package tree copied into the build context.
+BUNDLED_DIR_FLAGS="--bundled-dir /build/package"
+for _ext in "${EXTRA_EXT_ARRAY[@]}"; do
+  BUNDLED_DIR_FLAGS+=" --bundled-dir /build/package-${_ext}"
+done
+INSTALL_DEPS_CMD="python3.12 /build/install_handler_package_deps.py --target /build/output ${BUNDLED_DIR_FLAGS} --always-skip renglo-lib"
+
 # Build Dockerfile COPY lines and RUN steps for each extra extension.
 EXTRA_COPY_LINES=""
 EXTRA_BUILD_STEPS=""
 for _ext in "${EXTRA_EXT_ARRAY[@]}"; do
   EXTRA_COPY_LINES="${EXTRA_COPY_LINES}COPY extensions/${_ext}/package/ /build/package-${_ext}/"$'\n'
   EXTRA_BUILD_STEPS="${EXTRA_BUILD_STEPS}    echo \"==> Installing extra extension: ${_ext}\" && \\"$'\n'
-  EXTRA_BUILD_STEPS="${EXTRA_BUILD_STEPS}    python3.12 -c \"import tomllib, subprocess, sys; f=open('/build/package-${_ext}/pyproject.toml','rb'); deps=tomllib.load(f)['project'].get('dependencies',[]); f.close(); [subprocess.run([sys.executable,'-m','pip','install','--no-cache-dir','--target','/build/output',d],check=False) for d in deps]\" 2>&1 | tail -20 && \\"$'\n'
+  EXTRA_BUILD_STEPS="${EXTRA_BUILD_STEPS}    ${INSTALL_DEPS_CMD} --package-dir /build/package-${_ext} && \\"$'\n'
   EXTRA_BUILD_STEPS="${EXTRA_BUILD_STEPS}    cp -r /build/package-${_ext}/${_ext} /build/output/ && \\"$'\n'
   # Merge handlers_config.json if the extra extension has one
   EXTRA_BUILD_STEPS="${EXTRA_BUILD_STEPS}    ( [ -f /build/package-${_ext}/handlers_config.json ] && python3.12 -c \"import json, pathlib; base=pathlib.Path('/build/output/handlers_config.json'); extra=pathlib.Path('/build/package-${_ext}/handlers_config.json'); merged={**json.loads(base.read_text())['handlers'],**json.loads(extra.read_text())['handlers']}; base.write_text(json.dumps({'handlers':merged},indent=2)); print('Merged handlers_config.json with ${_ext}')\" || echo 'No handlers_config.json for ${_ext} — bundled as library only' ) && \\"$'\n'
 done
 
-WORKSPACE_ROOT="$(cd "$WORKSPACE_ROOT" && pwd)"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SOURCE_PACKAGE_DIR="$WORKSPACE_ROOT/$DOCKER_SOURCE_COPY_PATH"
-SOURCE_PACKAGE_DIR="${SOURCE_PACKAGE_DIR%/}"
-SERVICE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 if [[ -z "${OUTPUT_STATE_DIR:-}" ]]; then
   OUTPUT_STATE_DIR=$(python3 -c "
 import sys
@@ -150,6 +158,7 @@ WORKDIR /build
 
 COPY ${DOCKER_SOURCE_COPY_PATH}/ /build/package/
 COPY dev/renglo-lib/ /build/renglo-lib/
+COPY dev/extensions-service/scripts/install_handler_package_deps.py /build/install_handler_package_deps.py
 ${EXTRA_COPY_LINES}
 RUN set -e && \\
     cd /build && \\
@@ -157,7 +166,7 @@ RUN set -e && \\
     mkdir -p /build/output && \\
     python3.12 -m pip install --no-cache-dir --target /build/output /build/renglo-lib && \\
     python3.12 -m pip install --no-cache-dir build wheel setuptools-scm 2>&1 && \\
-    python3.12 -c "import tomllib, subprocess, sys; deps=tomllib.load(open('/build/package/pyproject.toml','rb'))['project']['dependencies']; [subprocess.run([sys.executable, '-m', 'pip', 'install', '--no-cache-dir', '--target', '/build/output', d], check=False) or True for d in deps]" 2>&1 | tail -60 && \\
+    ${INSTALL_DEPS_CMD} --package-dir /build/package && \\
     $RUN_LARGE_DEPS_LINE
     echo "Checking if ${PYTHON_PACKAGE} package was installed..." && \\
     (test -d /build/output/${PYTHON_PACKAGE} && echo "  ✓ ${PYTHON_PACKAGE} directory found" || echo "  ✗ ${PYTHON_PACKAGE} NOT found - will copy source") && \\
