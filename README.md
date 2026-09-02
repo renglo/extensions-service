@@ -45,7 +45,17 @@ Provisions handlers IAM + Lambda path only (no ECS cluster, ECR, or S3 results b
   python3 dev/extensions-service/run.py <env> build
   # When <env> and extension have different names:
   python3 dev/extensions-service/run.py <env> build --extension-repo <extension_name>
+  # Local ARM image for run-local / EXTERNAL_HANDLERS_USE_DEV_DOCKER:
+  python3 dev/extensions-service/run.py <env> build --local --no-ecs
   ```
+
+  `WORKSPACE_ROOT` overrides the repo root (default: parent of `dev/`).
+  `renglo-ci compose handlers-build` sets it to an isolated tree of unpublished
+  packages so this service can build without copying itself into that tree.
+  Build state (Dockerfile, zip, `.lambda_build`) then lands under
+  `$WORKSPACE_ROOT/dev/extensions-service/state/<env>/` so `docker build -f`
+  and the context are the same tree. Deploy/provision on the live clone still
+  use `dev/extensions-service/state/<env>/`.
 
   3. **Deploy** the zip to AWS Lambda
 
@@ -168,7 +178,7 @@ python3 dev/extensions-service/run.py <env> build
 | Flag | When to use |
 |------|-------------|
 | `--extension-repo` | Handler source folder when it differs from `<env>` |
-| `--extra-extensions` | Comma-separated extra extensions to bundle alongside the primary one. Their Python packages, dependencies, and `handlers_config.json` entries are merged into the artifact. |
+| `--extra-extensions` | Comma-separated extra extensions to bundle alongside the primary one. Their Python packages, dependencies, and `handlers_config.json` entries are merged into the artifact. When installing each package's `dependencies`, dist names already bundled in the same artifact (from `project.name` in each `pyproject.toml`) are skipped so BOM-pinned source wins over `pip install` of a sibling extension. |
 | `--large` | Force ECS image build (heavy deps) even before ECS is provisioned, or when you want zip + ECS image together |
 | `--no-ecs` | Lambda zip only, skip ECS image even if `provision_manifest.json` has ECS |
 | `--local` | Lambda zip for `run-local` on arm64 (ECS image stays amd64) |
@@ -196,6 +206,8 @@ python3 dev/extensions-service/run.py <env> deploy deploy \
 | `deploy undeploy` | Remove the Lambda function |
 | `--type ecs` | Legacy: build large image + run ECS push in one step (prefer `build --large` + `deploy push`) |
 | `--type default` | Zip Lambda, then ECS if extension config lists ECS handlers |
+
+**Large Lambda packages (>50 MB zipped):** `deploy_as_a_service.sh` uploads to `VARS.S3_BUCKET_NAME` from `deploy_input.json` and calls `create-function` / `update-function-code` with `--s3-bucket` / `--s3-key`. The GitHub handlers OIDC role needs `s3:PutObject` on that bucket (in addition to the ECS results bucket). Override with `LAMBDA_DEPLOY_S3_BUCKET`; force S3 with `LAMBDA_FORCE_S3_UPLOAD=1`.
 
 ### `deploy push`
 
