@@ -327,6 +327,7 @@ class ComputeStack(Construct):
         task_size: str = "medium",
         network_mode: str = "awsvpc",
         github_handlers_repo: str = "",
+        github_handlers_oidc_sub_repo: str = "",
         github_handlers_owner_id: str | None = None,
         github_handlers_repo_id: str | None = None,
         enable_staging: bool = True,
@@ -356,6 +357,8 @@ class ComputeStack(Construct):
                 aws_account=aws_account,
                 aws_region=aws_region,
                 github_handlers_repo=github_handlers_repo,
+                github_handlers_oidc_sub_repo=github_handlers_oidc_sub_repo
+                or github_handlers_repo,
                 github_handlers_owner_id=github_handlers_owner_id,
                 github_handlers_repo_id=github_handlers_repo_id,
                 enable_staging=enable_staging,
@@ -586,6 +589,8 @@ class ComputeStack(Construct):
             aws_account=aws_account,
             aws_region=aws_region,
             github_handlers_repo=github_handlers_repo,
+            github_handlers_oidc_sub_repo=github_handlers_oidc_sub_repo
+            or github_handlers_repo,
             github_handlers_owner_id=github_handlers_owner_id,
             github_handlers_repo_id=github_handlers_repo_id,
             enable_staging=enable_staging,
@@ -599,6 +604,7 @@ class ComputeStack(Construct):
         aws_account: str,
         aws_region: str,
         github_handlers_repo: str,
+        github_handlers_oidc_sub_repo: str = "",
         github_handlers_owner_id: str | None = None,
         github_handlers_repo_id: str | None = None,
         enable_staging: bool,
@@ -606,6 +612,7 @@ class ComputeStack(Construct):
     ) -> None:
         if not github_handlers_repo.strip():
             return
+        oidc_sub_repo = (github_handlers_oidc_sub_repo or github_handlers_repo).strip()
 
         oidc_provider = iam.OpenIdConnectProvider.from_open_id_connect_provider_arn(
             self,
@@ -634,7 +641,7 @@ class ComputeStack(Construct):
                         },
                         "StringLike": {
                             "token.actions.githubusercontent.com:sub": github_environment_sub_claims(
-                                github_handlers_repo,
+                                oidc_sub_repo,
                                 stage,
                                 owner_id=github_handlers_owner_id,
                                 repo_id=github_handlers_repo_id,
