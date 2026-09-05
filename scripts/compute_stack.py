@@ -31,6 +31,8 @@ from aws_cdk import aws_logs as logs
 from aws_cdk import aws_s3 as s3
 from constructs import Construct
 
+from github_oidc import github_environment_sub_claims
+
 DESCRIPTION = "Reglo Deployment"
 GITHUB_OIDC_PROVIDER_ARN_SUFFIX = "token.actions.githubusercontent.com"
 
@@ -41,8 +43,17 @@ HANDLERS_NETWORK_MODE_EXISTING = _HANDLERS_NETWORK_MODE_EXISTING
 
 
 def _apply_cfn_condition_to_construct_tree(scope: Construct, condition: CfnCondition) -> None:
-    """Apply a CloudFormation condition to every L1 child under scope."""
+    """Apply a CloudFormation condition to every L1 resource under scope.
+
+    L2 constructs (e.g. ec2.Vpc) expose their primary resource via default_child.
+    Nested L1s (RouteTable, IGW, VPCGatewayAttachment, …) are CfnResource nodes
+    themselves and have no default_child — both shapes must be conditioned or
+    HandlersNetworkMode=existing leaves unconditional Refs to the dedicated VPC.
+    """
     for construct in scope.node.find_all():
+        if isinstance(construct, CfnResource):
+            construct.cfn_options.condition = condition
+            continue
         cfn = construct.node.default_child
         if isinstance(cfn, CfnResource):
             cfn.cfn_options.condition = condition
@@ -317,6 +328,8 @@ class ComputeStack(Construct):
         network_mode: str = "awsvpc",
         github_handlers_repo: str = "",
         github_handlers_oidc_sub_repo: str = "",
+        github_handlers_owner_id: str | None = None,
+        github_handlers_repo_id: str | None = None,
         enable_staging: bool = True,
         tenant_policy: iam.IManagedPolicy | None = None,
         handlers_network_params: dict[str, Any] | None = None,
@@ -346,6 +359,8 @@ class ComputeStack(Construct):
                 github_handlers_repo=github_handlers_repo,
                 github_handlers_oidc_sub_repo=github_handlers_oidc_sub_repo
                 or github_handlers_repo,
+                github_handlers_owner_id=github_handlers_owner_id,
+                github_handlers_repo_id=github_handlers_repo_id,
                 enable_staging=enable_staging,
                 ecs_results_bucket=results_bucket_name,
             )
@@ -576,6 +591,8 @@ class ComputeStack(Construct):
             github_handlers_repo=github_handlers_repo,
             github_handlers_oidc_sub_repo=github_handlers_oidc_sub_repo
             or github_handlers_repo,
+            github_handlers_owner_id=github_handlers_owner_id,
+            github_handlers_repo_id=github_handlers_repo_id,
             enable_staging=enable_staging,
             ecs_results_bucket=bucket_name,
         )
@@ -588,6 +605,8 @@ class ComputeStack(Construct):
         aws_region: str,
         github_handlers_repo: str,
         github_handlers_oidc_sub_repo: str = "",
+        github_handlers_owner_id: str | None = None,
+        github_handlers_repo_id: str | None = None,
         enable_staging: bool,
         ecs_results_bucket: str,
     ) -> None:
@@ -621,9 +640,12 @@ class ComputeStack(Construct):
                             "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
                         },
                         "StringLike": {
-                            "token.actions.githubusercontent.com:sub": (
-                                f"repo:{oidc_sub_repo}:environment:{stage}"
-                            )
+                            "token.actions.githubusercontent.com:sub": github_environment_sub_claims(
+                                oidc_sub_repo,
+                                stage,
+                                owner_id=github_handlers_owner_id,
+                                repo_id=github_handlers_repo_id,
+                            ),
                         },
                     },
                 ),
@@ -1011,12 +1033,28 @@ class ComputeStack(Construct):
         capacity_provider_create.node.add_dependency(cfn_asg_create)
         capacity_provider_existing.node.add_dependency(cfn_asg_existing)
 
+        subnet_ids_existing = Fn.join(",", existing_subnet_ids.value_as_list)
+
+        # Branch-specific values for SSM (BootstrapConfig). Do NOT fold these into a
+        # single Fn::If on an always-created AWS::SSM::Parameter — the SSM resource
+        # provider fails PutParameter when the unused branch Refs conditional resources.
+        self.ecs_network_ssm = {
+            "create_condition": create_dedicated_network,
+            "existing_condition": use_existing_network,
+            "vpc_create": vpc.vpc_id,
+            "vpc_existing": existing_vpc_id.value_as_string,
+            "subnets_create": dedicated_subnet_ids,
+            "subnets_existing": subnet_ids_existing,
+            "security_groups_create": security_group_create.ref,
+            "security_groups_existing": security_group_existing.ref,
+        }
+
         return {
             "HandlersComputeVpcId": vpc_id_for_resources,
             "HandlersComputeSubnetIds": Fn.condition_if(
                 create_dedicated_network.logical_id,
                 dedicated_subnet_ids,
-                Fn.join(",", existing_subnet_ids.value_as_list),
+                subnet_ids_existing,
             ),
             "HandlersComputeSecurityGroupId": security_group_id,
         }
