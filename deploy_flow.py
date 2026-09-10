@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import os
-import subprocess
 import sys
 
 from deploy_input import (
@@ -15,11 +13,10 @@ from lib import (
     get_env_state_dir,
     get_lambda_deployment_zip_path,
     get_workspace_root,
-    get_script_dir,
-    merge_script_env,
     parse_extension_repo_flag,
     parse_extra_extensions_flag,
     resolve_extension_repo_dir,
+    run_service_script,
     validate_extension,
     validate_extension_name,
 )
@@ -27,13 +24,7 @@ from state_store import STATE_VERSION, default_release_manifest, ensure_state_di
 
 
 def _run_script(script_name: str, env: dict[str, str], extra_args: list[str] | None = None) -> int:
-    script = get_script_dir() / script_name
-    if not script.is_file():
-        print(f"ERROR: Script not found: {script}")
-        return 1
-    run_env = merge_script_env(env)
-    cmd = [str(script), *(extra_args or [])]
-    return subprocess.run(cmd, cwd=get_workspace_root(), env=run_env).returncode
+    return run_service_script(script_name, env=env, extra_args=extra_args)
 
 
 def _load_release_manifest(extension: str):

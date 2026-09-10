@@ -15,13 +15,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lib import (
-    get_script_dir,
     get_workspace_root,
     get_function_name,
     get_lambda_deployment_zip_path,
     get_ecs_handlers_for_extension,
     list_extensions,
     merge_script_env,
+    run_service_script,
     validate_extension,
     validate_environment_name,
 )
@@ -53,15 +53,7 @@ def _parse_profile_and_filter_args(args: list[str]) -> tuple[str | None, list[st
 
 
 def _run_script(script_name: str, env: dict | None = None, extra_args: list[str] | None = None) -> int:
-    script_dir = get_script_dir()
-    script = script_dir / script_name
-    if not script.is_file():
-        print(f"ERROR: Script not found: {script}", file=sys.stderr)
-        return 1
-    run_env = merge_script_env(env)
-    cwd = get_workspace_root()
-    cmd = [str(script), *(extra_args or [])]
-    return subprocess.run(cmd, env=run_env, cwd=cwd).returncode
+    return run_service_script(script_name, env=env, extra_args=extra_args)
 
 
 def _run_domain_main(domain_dir: str, environment: str, action: str, rest: list[str]) -> int:
