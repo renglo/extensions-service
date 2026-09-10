@@ -4,6 +4,9 @@ Extensions are identified by extensions/<name>/package (handler code).
 Deploy configuration lives in this package under state/<name>/deploy_input.json.
 """
 import os
+import shutil
+import subprocess
+import sys
 import tomllib
 from pathlib import Path
 
@@ -15,6 +18,56 @@ def merge_script_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     if extra:
         run_env.update(extra)
     return run_env
+
+
+def resolve_bash() -> str | None:
+    """Bash for ``.sh`` scripts. ``None`` on POSIX (run the script directly).
+
+    On Windows, prefer Git Bash over WSL's ``System32\\bash.exe`` (WSL remaps
+    ``C:\\`` to ``/mnt/c`` and breaks Docker Desktop build contexts).
+    Override with ``EXTENSIONS_SERVICE_BASH``.
+    """
+    if os.name != "nt":
+        return None
+    override = os.environ.get("EXTENSIONS_SERVICE_BASH", "").strip()
+    if override:
+        return override
+    for candidate in (
+        Path(r"C:\Program Files\Git\bin\bash.exe"),
+        Path(r"C:\Program Files (x86)\Git\bin\bash.exe"),
+    ):
+        if candidate.is_file():
+            return str(candidate)
+    found = shutil.which("bash")
+    if found:
+        normalized = found.replace("/", "\\").lower()
+        if "system32" not in normalized and "windowsapps" not in normalized:
+            return found
+    raise RuntimeError(
+        "bash not found for running .sh scripts on Windows. "
+        "Install Git for Windows or set EXTENSIONS_SERVICE_BASH to bash.exe."
+    )
+
+
+def run_service_script(
+    script_name: str,
+    env: dict[str, str] | None = None,
+    extra_args: list[str] | None = None,
+) -> int:
+    """Run a file under ``scripts/`` (.sh via bash on Windows; .py via sys.executable)."""
+    script = get_script_dir() / script_name
+    if not script.is_file():
+        print(f"ERROR: Script not found: {script}", file=sys.stderr)
+        return 1
+    run_env = merge_script_env(env)
+    cwd = get_workspace_root()
+    extra = list(extra_args or [])
+    if script.suffix == ".py":
+        cmd = [sys.executable, str(script), *extra]
+    else:
+        bash = resolve_bash()
+        cmd = [bash, str(script), *extra] if bash else [str(script), *extra]
+    return subprocess.run(cmd, cwd=cwd, env=run_env).returncode
 
 
 def get_workspace_root() -> Path:
