@@ -70,6 +70,24 @@ def run_service_script(
     return subprocess.run(cmd, cwd=cwd, env=run_env).returncode
 
 
+def docker_context_relpath(workspace_root: Path, absolute_path: Path) -> str:
+    """POSIX-relative path from the Docker build context (workspace) to a file/dir.
+
+    Used so Dockerfiles can COPY tooling staged under state/.lambda_build/ whether
+    the service lives at ``ops/extensions-service`` (monorepo) or
+    ``dev/extensions-service`` (CI / compose isolated tree).
+    """
+    root = workspace_root.resolve()
+    target = absolute_path.resolve()
+    try:
+        return target.relative_to(root).as_posix()
+    except ValueError as exc:
+        raise ValueError(
+            f"{target} is not under Docker context {root}; "
+            "OUTPUT_STATE_DIR must stay inside WORKSPACE_ROOT"
+        ) from exc
+
+
 def get_workspace_root() -> Path:
     """Repo/workspace root (parent of top-level dirs like extensions/, dev/).
 

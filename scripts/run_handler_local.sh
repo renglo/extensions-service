@@ -74,7 +74,9 @@ elif ! docker image inspect "$DOCKER_IMAGE" >/dev/null 2>&1; then
 fi
 
 AWS_MOUNT=()
-[[ -d "$HOME/.aws" ]] && AWS_MOUNT=(-v "$HOME/.aws:/root/.aws:ro")
+if [[ -d "$HOME/.aws" ]]; then
+  AWS_MOUNT=(-v "$(docker_volume_host_path "$HOME/.aws"):/root/.aws:ro")
+fi
 AWS_ENV=()
 [[ -n "${AWS_PROFILE:-}" ]] && AWS_ENV+=(-e "AWS_PROFILE=$AWS_PROFILE")
 [[ -n "${AWS_ACCESS_KEY_ID:-}" ]] && AWS_ENV+=(-e "AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID")
@@ -117,10 +119,10 @@ except Exception as e:
     sys.exit(1)
 PYEOF
 
-docker run --rm --platform "$RUN_PLATFORM" --entrypoint /bin/sh \
-  -v "$PACKAGE_DIR:/package" \
-  -v "$EVENT_FILE:/tmp/event.json:ro" \
-  -v "$TEMP_SCRIPT:/tmp/run_handler.py:ro" \
+docker_cli run --rm --platform "$RUN_PLATFORM" --entrypoint /bin/sh \
+  -v "$(docker_volume_host_path "$PACKAGE_DIR"):/package" \
+  -v "$(docker_volume_host_path "$EVENT_FILE"):/tmp/event.json:ro" \
+  -v "$(docker_volume_host_path "$TEMP_SCRIPT"):/tmp/run_handler.py:ro" \
   "${AWS_MOUNT[@]}" "${AWS_ENV[@]}" \
   -w /package "$DOCKER_IMAGE" \
   -c "python3.12 /tmp/run_handler.py" || exit 1
