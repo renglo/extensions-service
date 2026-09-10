@@ -1,9 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# shellcheck source=_common.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_common.sh"
 
 # Build Lambda deployment package using Docker (shared script).
 # Requires: EXTENSION_NAME, WORKSPACE_ROOT in environment (set by run.py).
-# Optional: EXTENSION_REPO, DOCKER_SOURCE_COPY_PATH, PYTHON_PACKAGE, OUTPUT_STATE_DIR, DEPLOYMENT_ZIP.
+# Optional: EXTENSION_REPO, DOCKER_SOURCE_COPY_PATH, PYTHON_PACKAGE, OUTPUT_STATE_DIR,
+#           DEPLOYMENT_ZIP, RENGLO_LIB_COPY_PATH (default: dev/renglo-lib).
+#
+# Tooling scripts (install_handler_package_deps.py, ecs entrypoint) are staged from
+# this service's tree into .lambda_build/ so the Docker context can be a monorepo
+# (ops/extensions-service), a CI checkout (dev/extensions-service), or a compose
+# workspace that never clones the service (live run.py + WORKSPACE_ROOT).
 
 if [[ -z "${EXTENSION_NAME:-}" || -z "${WORKSPACE_ROOT:-}" ]]; then
   echo "ERROR: EXTENSION_NAME and WORKSPACE_ROOT must be set (run via: python run.py <env> build)" >&2
@@ -13,6 +21,7 @@ fi
 EXTENSION_REPO="${EXTENSION_REPO:-$EXTENSION_NAME}"
 PYTHON_PACKAGE="${PYTHON_PACKAGE:-$EXTENSION_NAME}"
 DOCKER_SOURCE_COPY_PATH="${DOCKER_SOURCE_COPY_PATH:-extensions/$EXTENSION_REPO/package}"
+RENGLO_LIB_COPY_PATH="${RENGLO_LIB_COPY_PATH:-dev/renglo-lib}"
 
 # Extra extensions to bundle alongside the primary one (comma-separated, e.g. "pes,schd").
 # Set by run.py from EXTERNAL_HANDLERS in env_config.py.
@@ -105,6 +114,12 @@ if [[ ! -d "$SOURCE_PACKAGE_DIR" ]]; then
   exit 1
 fi
 
+if [[ ! -d "$WORKSPACE_ROOT/$RENGLO_LIB_COPY_PATH" ]]; then
+  echo "ERROR: renglo-lib not found at $WORKSPACE_ROOT/$RENGLO_LIB_COPY_PATH" >&2
+  echo "Set RENGLO_LIB_COPY_PATH or place the clone under the Docker context." >&2
+  exit 1
+fi
+
 mkdir -p "$OUTPUT_STATE_DIR"
 
 if [[ -d "$BUILD_DIR" ]]; then
@@ -114,12 +129,41 @@ fi
 
 mkdir -p "$BUILD_DIR"
 
+# Stage service tooling into the Docker context (WORKSPACE_ROOT). Compose skips
+# cloning extensions-service; monorepo may keep it under ops/ instead of dev/.
+INSTALL_DEPS_SRC="$SERVICE_ROOT/scripts/install_handler_package_deps.py"
+if [[ ! -f "$INSTALL_DEPS_SRC" ]]; then
+  echo "ERROR: Missing $INSTALL_DEPS_SRC" >&2
+  exit 1
+fi
+cp "$INSTALL_DEPS_SRC" "$BUILD_DIR/install_handler_package_deps.py"
+if [[ "$BUILD_LARGE" == "1" ]]; then
+  ECS_ENTRY_SRC="$SERVICE_ROOT/scripts/ecs_handler_entrypoint.py"
+  if [[ ! -f "$ECS_ENTRY_SRC" ]]; then
+    echo "ERROR: Missing $ECS_ENTRY_SRC" >&2
+    exit 1
+  fi
+  cp "$ECS_ENTRY_SRC" "$BUILD_DIR/ecs_handler_entrypoint.py"
+fi
+
+# Both paths already normalized via pwd (Git Bash: /c/Users/...). Avoid Windows
+# Python pathlib on those forms; strip the context prefix in bash instead.
+case "$BUILD_DIR" in
+  "$WORKSPACE_ROOT"/*) BUILD_REL="${BUILD_DIR#"$WORKSPACE_ROOT"/}" ;;
+  *)
+    echo "ERROR: BUILD_DIR is not under WORKSPACE_ROOT ($BUILD_DIR vs $WORKSPACE_ROOT)" >&2
+    echo "OUTPUT_STATE_DIR must stay inside the Docker context." >&2
+    exit 1
+    ;;
+esac
+
 if ! command -v docker >/dev/null 2>&1; then
   echo "ERROR: Docker is not installed or not in PATH" >&2
   exit 1
 fi
 
 echo "==> Using Docker to build Lambda-compatible package..."
+echo "    Service tooling staged at: $BUILD_REL/"
 echo ""
 
 # When BUILD_LARGE=1: inject pip install [large-dependencies] with retry (wheel-only for wheel_libs.json); no if inside container.
@@ -144,7 +188,8 @@ if [[ ${#EXTRA_EXT_ARRAY[@]} -gt 0 ]]; then
   echo "DEBUG: Extra extensions to bundle: ${EXTRA_EXT_ARRAY[*]}"
 fi
 
-# Dockerfile with EXTENSION_NAME and RUN_LARGE_DEPS_LINE/RUN_ZIP_LINE expanded (unquoted heredoc)
+# Dockerfile with paths and RUN_LARGE_DEPS_LINE/RUN_ZIP_LINE expanded (unquoted heredoc).
+# RUN_LARGE_DEPS_LINE must sit against the next line (no blank) to avoid empty continuations.
 cat > "$BUILD_DIR/Dockerfile" << DOCKERFILE
 FROM public.ecr.aws/lambda/python:3.12
 
@@ -157,8 +202,8 @@ RUN python3.12 -m pip install --upgrade pip setuptools wheel && \\
 WORKDIR /build
 
 COPY ${DOCKER_SOURCE_COPY_PATH}/ /build/package/
-COPY dev/renglo-lib/ /build/renglo-lib/
-COPY dev/extensions-service/scripts/install_handler_package_deps.py /build/install_handler_package_deps.py
+COPY ${RENGLO_LIB_COPY_PATH}/ /build/renglo-lib/
+COPY ${BUILD_REL}/install_handler_package_deps.py /build/install_handler_package_deps.py
 ${EXTRA_COPY_LINES}
 RUN set -e && \\
     cd /build && \\
@@ -167,8 +212,7 @@ RUN set -e && \\
     python3.12 -m pip install --no-cache-dir --target /build/output /build/renglo-lib && \\
     python3.12 -m pip install --no-cache-dir build wheel setuptools-scm 2>&1 && \\
     ${INSTALL_DEPS_CMD} --package-dir /build/package && \\
-    $RUN_LARGE_DEPS_LINE
-    echo "Checking if ${PYTHON_PACKAGE} package was installed..." && \\
+${RUN_LARGE_DEPS_LINE}    echo "Checking if ${PYTHON_PACKAGE} package was installed..." && \\
     (test -d /build/output/${PYTHON_PACKAGE} && echo "  ✓ ${PYTHON_PACKAGE} directory found" || echo "  ✗ ${PYTHON_PACKAGE} NOT found - will copy source") && \\
     cp -r /build/package/${PYTHON_PACKAGE} /build/output/ && \\
     cp /build/package/lambda_router.py /build/output/ && \\
@@ -186,8 +230,8 @@ ${EXTRA_BUILD_STEPS}    cd /build/output && \\
 DOCKERFILE
 
 if [[ "$BUILD_LARGE" == "1" ]]; then
-  cat >> "$BUILD_DIR/Dockerfile" << 'DOCKERFILE_ECS'
-COPY dev/extensions-service/scripts/ecs_handler_entrypoint.py /ecs_entrypoint.py
+  cat >> "$BUILD_DIR/Dockerfile" << DOCKERFILE_ECS
+COPY ${BUILD_REL}/ecs_handler_entrypoint.py /ecs_entrypoint.py
 WORKDIR /build/output
 ENTRYPOINT ["python3.12", "/ecs_entrypoint.py"]
 DOCKERFILE_ECS
@@ -207,10 +251,10 @@ docker build \
 
 if [[ "$EXTRACT_ZIP" == "true" ]]; then
   echo "==> Extracting deployment package (for Lambda upload)..."
-  docker run --rm \
+  docker_cli run --rm \
     --platform "$DOCKER_PLATFORM" \
     --entrypoint /bin/sh \
-    -v "$OUTPUT_STATE_DIR:/output" \
+    -v "$(docker_volume_host_path "$OUTPUT_STATE_DIR"):/output" \
     "$DOCKER_IMAGE" \
     -c "cp /build/lambda_deployment.zip /output/ && chmod 644 /output/lambda_deployment.zip" || {
     echo "ERROR: Failed to extract deployment package" >&2

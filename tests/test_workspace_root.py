@@ -11,7 +11,7 @@ _SERVICE_ROOT = Path(__file__).resolve().parent.parent
 if str(_SERVICE_ROOT) not in sys.path:
     sys.path.insert(0, str(_SERVICE_ROOT))
 
-from lib import get_workspace_root  # noqa: E402
+from lib import docker_context_relpath, get_workspace_root  # noqa: E402
 from state_store import (  # noqa: E402
     default_repo_root,
     get_extensions_service_root,
@@ -60,3 +60,33 @@ def test_get_state_paths_follows_workspace_root_env(
     assert paths.root == tmp_path.resolve()
     assert paths.state_dir == tmp_path.resolve() / "dev" / "extensions-service" / "state" / "arbitium"
     assert paths.lambda_deployment_zip == paths.state_dir / "lambda_deployment.zip"
+
+
+def test_docker_context_relpath_under_ops_layout(tmp_path: Path) -> None:
+    build = tmp_path / "ops" / "extensions-service" / "state" / "arbitium" / ".lambda_build"
+    build.mkdir(parents=True)
+    assert (
+        docker_context_relpath(tmp_path, build)
+        == "ops/extensions-service/state/arbitium/.lambda_build"
+    )
+
+
+def test_docker_context_relpath_under_compose_dev_layout(tmp_path: Path) -> None:
+    build = (
+        tmp_path / "dev" / "extensions-service" / "state" / "arbitium0813" / ".lambda_build"
+    )
+    build.mkdir(parents=True)
+    assert (
+        docker_context_relpath(tmp_path, build)
+        == "dev/extensions-service/state/arbitium0813/.lambda_build"
+    )
+
+
+def test_docker_context_relpath_rejects_outside_workspace(tmp_path: Path) -> None:
+    other = tmp_path.parent / "outside-build"
+    other.mkdir(exist_ok=True)
+    try:
+        docker_context_relpath(tmp_path, other)
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "not under Docker context" in str(exc)
