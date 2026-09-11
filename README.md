@@ -85,7 +85,7 @@ Provisions handlers IAM plus ECS cluster, ECR, and S3 results bucket. Uses the d
     --github-repo <org>/<handlers-repo> #Optional
   ```
 
-2. **Build** the Lambda zip from a prepared wheelhouse (see [HANDLERS.md](HANDLERS.md))
+2. **Build** the Lambda zip (and optionally ECS image) from a prepared wheelhouse (see [HANDLERS.md](HANDLERS.md))
 
   ```bash
   python3 ops/bom-helper/scripts/prepare_handlers_wheelhouse.py \
@@ -95,9 +95,16 @@ Provisions handlers IAM plus ECS cluster, ECR, and S3 results bucket. Uses the d
     --wheelhouse .handlers-build/wheelhouse \
     --assets .handlers-build/handlers-assets \
     --packages arbitium-lab,arbitium-triage
-  ```
 
-  ECS/`--large` package image is not supported yet (same wheelhouse contract next).
+  # ECS / large (add --with-large-deps on prepare, then --large on build):
+  python3 ops/bom-helper/scripts/prepare_handlers_wheelhouse.py \
+    --from-monorepo extensions/arbitium/package,extensions/arbitiumtriage/package \
+    --with-large-deps --out .handlers-build
+  python3 ops/extensions-service/run.py <env> build --large \
+    --wheelhouse .handlers-build/wheelhouse \
+    --assets .handlers-build/handlers-assets \
+    --packages arbitium-lab,arbitium-triage
+  ```
 
 3. **Deploy** Lambda (zip) and push the ECS image (ECR + task definition)
 
@@ -168,8 +175,8 @@ Stage 2 has two publish paths: Lambda (zip) and ECS (Docker image). Docker is a 
 
 | Target | Build | Publish to AWS |
 |--------|-------|----------------|
-| Handlers Lambda | `build --wheelhouse/...` | `deploy deploy` / `deploy update` |
-| Handlers ECS | not migrated yet (same wheelhouse next) | `deploy push` (blocked until then) |
+| Handlers Lambda | `build --wheelhouse/...` (always) | `deploy deploy` / `deploy update` |
+| Handlers ECS | `build --large` (or auto if ECS provisioned) | `deploy push` |
 
 `deploy push` does not deploy Lambda. For Lambda-only environments, stop after `deploy deploy`.
 
@@ -179,7 +186,7 @@ Optional: `provision_manifest.json` in state supplements deploy push (cluster, l
 
 ### `build` / `deploy build`
 
-`build` produces the Lambda zip from a **prepared wheelhouse** (`--wheelhouse`, `--assets`, `--packages`). Pass `--no-ecs` until the ECS package image uses the same contract.
+`build` always produces the Lambda zip / `*-lambda-builder` from a **prepared wheelhouse** (`--wheelhouse`, `--assets`, `--packages`). Pass `--large` (or leave ECS auto-detect on) for `*-ecs-builder` with `[large-dependencies]` — prepare with `--with-large-deps` first. `--no-ecs` skips the ECS image.
 
 ```bash
 # See HANDLERS.md — prepare wheelhouse first, then:
@@ -187,21 +194,27 @@ python3 ops/extensions-service/run.py <env> build --no-ecs \
   --wheelhouse .handlers-build/wheelhouse \
   --assets .handlers-build/handlers-assets \
   --packages arbitium-lab,arbitium-triage
+
+python3 ops/extensions-service/run.py <env> build --large \
+  --wheelhouse .handlers-build/wheelhouse \
+  --assets .handlers-build/handlers-assets \
+  --packages arbitium-lab,arbitium-triage
 ```
 
-**Optional:**
+**Flags:**
 
 | Flag | When to use |
 |------|-------------|
 | `--wheelhouse` / `--assets` / `--packages` | **Required.** From `prepare_handlers_wheelhouse.py`; `--packages` are dist names. |
-| `--no-ecs` | Compatibility / silence ECS note (package `--large` not available yet) |
-| `--local` | Lambda platform/tag arm64 `:local` (not “use monorepo tree”) |
-| `--large` / `--extensions` | Not supported yet (same wheelhouse contract coming next) |
+| `--large` | Also build `*-ecs-builder` with `[large-dependencies]` |
+| `--no-ecs` | Skip ECS image even if provisioned |
+| `--local` | Lambda/ECS platform/tag arm64 `:local` |
 
 | Build output | Used by |
 |--------------|---------|
 | `extensions-service/state/<env>/lambda_deployment.zip` | `deploy deploy` / `deploy update` |
-| `<env>-ecs-builder:latest` image | `deploy push` (when large path returns) |
+| `<env>-lambda-builder:latest` | Local DEV_DOCKER sync (Lambda) |
+| `<env>-ecs-builder:latest` | `deploy push` / ECS async; local sync smoke for ECS handlers |
 
 ### `deploy deploy` / `deploy update` / `deploy undeploy`
 
@@ -322,7 +335,7 @@ is installed from dist names via `--packages` (not monorepo folder COPY).
 In `extensions/<name>/package/pyproject.toml`:
 
 - **`[project.dependencies]`** — Lambda zip (keep small)
-- **`[project.optional-dependencies] large-dependencies`** — heavy libs for the future ECS/`--large` wheelhouse image
+- **`[project.optional-dependencies] large-dependencies`** — heavy libs for `build --large` / ECS image
 
 If `pip install` fails, the build retries with `--only-binary` for packages in `dev/extensions-service/wheel_libs.json`.
 
