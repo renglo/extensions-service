@@ -4,7 +4,8 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_common.sh"
 
 # Deploy extension handlers to ECS (Fargate and/or EC2 per extensions/<name>/installer/ecs_profile.json).
-# Requires: EXTENSION_NAME, WORKSPACE_ROOT. Image must exist (run build --large first).
+# Requires: EXTENSION_NAME, WORKSPACE_ROOT. Image must exist (wheelhouse Lambda build today;
+# ECS/--large package image is not migrated yet).
 # Optional env: ECS_RESULTS_BUCKET, ECS_CLUSTER, ECS_TASK_DEFINITION, AWS_REGION, AWS_PROFILE.
 
 if [[ -z "${EXTENSION_NAME:-}" || -z "${WORKSPACE_ROOT:-}" ]]; then
@@ -88,7 +89,7 @@ echo "Task definition template: $(basename "$TASK_DEF_TEMPLATE")"
 echo ""
 
 if ! docker image inspect "$DOCKER_IMAGE" >/dev/null 2>&1; then
-  echo "ERROR: Docker image $DOCKER_IMAGE not found. Run: python3 run.py $EXTENSION_NAME build --large" >&2
+  echo "ERROR: Docker image $DOCKER_IMAGE not found. Build a handlers image first (wheelhouse Lambda path today; ECS/--large not migrated yet)." >&2
   exit 1
 fi
 

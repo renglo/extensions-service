@@ -9,15 +9,15 @@ from deploy_input import (
     resolve_deploy_input_file,
 )
 from lib import (
-    detect_python_package,
     get_env_state_dir,
     get_lambda_deployment_zip_path,
     get_workspace_root,
     parse_extension_repo_flag,
+    parse_extensions_flag,
     parse_extra_extensions_flag,
-    resolve_extension_repo_dir,
+    parse_packages_flag,
+    parse_value_flag,
     run_service_script,
-    validate_extension,
     validate_extension_name,
 )
 from state_store import STATE_VERSION, default_release_manifest, ensure_state_dir, get_state_paths, read_json, utc_now_iso, write_json
@@ -37,72 +37,67 @@ def _build_env_for_single(
     env_name: str,
     root,
     *,
-    extension_repo: str | None,
-    large: bool,
     local: bool,
-    extra_extensions: list[str] | None = None,
+    wheelhouse: str,
+    assets: str,
+    packages: list[str],
 ) -> dict[str, str]:
     validate_extension_name(env_name)
-    repo_name = (extension_repo or env_name).strip()
-    package_dir, docker_copy_path = resolve_extension_repo_dir(repo_name, root)
-    python_package = detect_python_package(package_dir)
     state_dir = get_env_state_dir(env_name, root)
     ensure_state_dir(get_state_paths(env_name, root))
     deployment_zip = get_lambda_deployment_zip_path(env_name, root)
-    if extension_repo and extension_repo.strip() != env_name:
-        print(f"Build source: {package_dir} (repo {repo_name!r}, env {env_name!r})")
-        print(f"Python package: {python_package}")
     print(f"Output zip: {deployment_zip}")
-    env = {
+    print(f"Wheelhouse: {wheelhouse}")
+    print(f"Assets:     {assets}")
+    print(f"Packages:   {', '.join(packages)}")
+    return {
         "EXTENSION_NAME": env_name,
-        "EXTENSION_REPO": repo_name,
-        "DOCKER_SOURCE_COPY_PATH": docker_copy_path,
-        "PYTHON_PACKAGE": python_package,
+        "EXTENSION_REPO": env_name,
+        "DOCKER_SOURCE_COPY_PATH": "",
+        "PYTHON_PACKAGE": "",
         "OUTPUT_STATE_DIR": str(state_dir),
         "DEPLOYMENT_ZIP": str(deployment_zip),
         "WORKSPACE_ROOT": str(root),
         "EXTENSION_SERVICE_NATIVE_PLATFORM": "1" if local else "0",
-        "EXTENSION_SERVICE_LARGE_BUILD": "1" if large else "0",
+        "EXTENSION_SERVICE_LARGE_BUILD": "0",
+        "HANDLERS_WHEELHOUSE": str(wheelhouse),
+        "HANDLERS_ASSETS": str(assets),
+        "HANDLERS_PACKAGES": ",".join(packages),
     }
-    if extra_extensions:
-        env["EXTRA_EXTENSIONS"] = ",".join(extra_extensions)
-    return env
 
 
 def _build_single(
     extension: str,
     root,
-    large: bool,
     local: bool,
     *,
-    extension_repo: str | None = None,
-    extra_extensions: list[str] | None = None,
+    wheelhouse: str,
+    assets: str,
+    packages: list[str],
 ) -> int:
     """Run one build pass and update the release manifest. Returns the script exit code."""
+    from pathlib import Path
+    import shutil
+
     env = _build_env_for_single(
-        extension, root,
-        extension_repo=extension_repo,
-        large=large, local=local,
-        extra_extensions=extra_extensions,
+        extension,
+        root,
+        local=local,
+        wheelhouse=wheelhouse,
+        assets=assets,
+        packages=packages,
     )
     rc = _run_script("build_lambda_package.sh", env=env)
     if rc != 0:
         return rc
-    # Copy handlers_config.json to state so deploy --type default can read it without the source repo
-    repo_name = (extension_repo or extension).strip()
-    source_package_dir, _ = resolve_extension_repo_dir(repo_name, root)
-    handlers_cfg_src = source_package_dir / "handlers_config.json"
     paths_for_copy = get_state_paths(extension, root)
     handlers_cfg_dst = paths_for_copy.state_dir / "handlers_config.json"
+    handlers_cfg_src = Path(assets) / "handlers_config.json"
     if handlers_cfg_src.is_file():
-        import shutil
         shutil.copy2(handlers_cfg_src, handlers_cfg_dst)
     paths, manifest = _load_release_manifest(extension)
-    mode = "ecs-large" if large else "lambda"
-    if mode == "ecs-large":
-        image = f"{extension}-ecs-builder:{'local' if local else 'latest'}"
-    else:
-        image = f"{extension}-lambda-builder:{'local' if local else 'latest'}"
+    mode = "lambda"
+    image = f"{extension}-lambda-builder:{'local' if local else 'latest'}"
     manifest["state_version"] = STATE_VERSION
     manifest["updated_at"] = utc_now_iso()
     manifest.setdefault("builds", {})
@@ -111,7 +106,6 @@ def _build_single(
         "platform": "linux/arm64" if local else "linux/amd64",
         "created_at": utc_now_iso(),
     }
-    # Keep last_build pointing to the most recently completed build
     manifest["last_build"] = {
         **manifest["builds"][mode],
         "mode": mode,
@@ -135,53 +129,90 @@ def _ecs_is_provisioned(extension: str) -> bool:
 
 
 def cmd_build(extension: str, args: list[str]) -> int:
-    """Build artifacts for the extension.
-
-    Lambda zip is always built first. ECS image is also built when:
-      - provision_manifest.json exists with an ECS cluster (auto-detected), OR
-      - --large is passed explicitly (useful before provision-infra has run).
+    """Build the Lambda zip from a prepare_handlers_wheelhouse output.
 
     Flags:
-      --extension-repo    Folder with package/ when source differs from <env> (e.g. arbitiumrs).
-      --extra-extensions  Comma-separated extra extensions to bundle (e.g. pes,schd).
-      --large             Force ECS image build in addition to Lambda zip.
-      --local             Build Lambda as ARM64 (for run-local). ECS image is always amd64.
-      --no-ecs            Skip ECS image build even when provision_manifest says ECS is provisioned.
+      --wheelhouse DIR    find-links dir from prepare_handlers_wheelhouse.py
+      --assets DIR        handlers-assets/ (router + configs)
+      --packages a,b      ordered pip dist names (e.g. arbitium-lab,arbitium-triage)
+      --local             Build as ARM64 `:local` (arch/tag only)
+      --no-ecs            Accepted for compatibility (ECS package build is not available yet)
+      --large             Rejected until large uses the same wheelhouse contract
     """
-    root = get_workspace_root()
+    from pathlib import Path
+
+    root = get_workspace_root().resolve()
     try:
-        filtered_args, extension_repo = parse_extension_repo_flag(args)
+        filtered_args, extensions_list = parse_extensions_flag(args)
+        filtered_args, extension_repo = parse_extension_repo_flag(filtered_args)
         filtered_args, extra_extensions = parse_extra_extensions_flag(filtered_args)
+        filtered_args, wheelhouse = parse_value_flag(filtered_args, "--wheelhouse")
+        filtered_args, assets = parse_value_flag(filtered_args, "--assets")
+        filtered_args, packages = parse_packages_flag(filtered_args)
     except ValueError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 
+    if extensions_list or extension_repo or extra_extensions:
+        print(
+            "ERROR: --extensions/--extension-repo/--extra-extensions are removed; "
+            "use --wheelhouse/--assets/--packages (dist names).",
+            file=sys.stderr,
+        )
+        return 1
+
     try:
-        force_large = "--large" in filtered_args
-        skip_ecs = "--no-ecs" in filtered_args
+        if "--large" in filtered_args:
+            print(
+                "ERROR: --large is not supported yet; use --no-ecs with a wheelhouse build. "
+                "ECS/large will share the same prepare→wheelhouse path.",
+                file=sys.stderr,
+            )
+            return 1
+
         build_local = "--local" in filtered_args
+        skip_ecs = "--no-ecs" in filtered_args
 
-        if extra_extensions:
-            print(f"  Extra extensions to bundle: {', '.join(extra_extensions)}")
+        wh_path = Path(wheelhouse).resolve() if wheelhouse else None
+        assets_path = Path(assets).resolve() if assets else None
+        has_wheelhouse = bool(wh_path and assets_path and packages)
+        if any([wheelhouse, assets, packages]) and not has_wheelhouse:
+            print(
+                "ERROR: build requires --wheelhouse, --assets, and --packages together",
+                file=sys.stderr,
+            )
+            return 1
+        if not has_wheelhouse:
+            print(
+                "ERROR: build requires --wheelhouse/--assets/--packages "
+                "(see prepare_handlers_wheelhouse.py).",
+                file=sys.stderr,
+            )
+            return 1
+        if wh_path is not None and not wh_path.is_dir():
+            print(f"ERROR: --wheelhouse not a directory: {wh_path}", file=sys.stderr)
+            return 1
+        if assets_path is not None and not assets_path.is_dir():
+            print(f"ERROR: --assets not a directory: {assets_path}", file=sys.stderr)
+            return 1
 
-        # Lambda zip is always the first artifact
         print("==> Building Lambda zip...")
         rc = _build_single(
-            extension, root, large=False, local=build_local,
-            extension_repo=extension_repo,
-            extra_extensions=extra_extensions or None,
+            extension,
+            root,
+            local=build_local,
+            wheelhouse=str(wh_path),
+            assets=str(assets_path),
+            packages=packages,
         )
         if rc != 0:
             return rc
 
-        # ECS image: explicit flag OR auto-detected from provision_manifest / deploy_input
-        if not skip_ecs and (force_large or _ecs_is_provisioned(extension)):
-            source = "--large flag" if force_large else "deploy_input / provision_manifest"
-            print(f"==> Building ECS image (detected from {source})...")
-            return _build_single(
-                extension, root, large=True, local=False,
-                extension_repo=extension_repo,
-                extra_extensions=extra_extensions or None,
+        if not skip_ecs and _ecs_is_provisioned(extension):
+            print(
+                "NOTE: ECS is provisioned but --large package build is not available yet; "
+                "Lambda zip only. Pass --no-ecs to silence this note.",
+                file=sys.stderr,
             )
 
         return 0
