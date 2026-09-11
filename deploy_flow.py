@@ -38,6 +38,7 @@ def _build_env_for_single(
     root,
     *,
     local: bool,
+    large: bool,
     wheelhouse: str,
     assets: str,
     packages: list[str],
@@ -46,7 +47,10 @@ def _build_env_for_single(
     state_dir = get_env_state_dir(env_name, root)
     ensure_state_dir(get_state_paths(env_name, root))
     deployment_zip = get_lambda_deployment_zip_path(env_name, root)
-    print(f"Output zip: {deployment_zip}")
+    kind = "ecs" if large else "lambda"
+    print(f"Build kind:  {kind}")
+    if not large:
+        print(f"Output zip: {deployment_zip}")
     print(f"Wheelhouse: {wheelhouse}")
     print(f"Assets:     {assets}")
     print(f"Packages:   {', '.join(packages)}")
@@ -59,7 +63,7 @@ def _build_env_for_single(
         "DEPLOYMENT_ZIP": str(deployment_zip),
         "WORKSPACE_ROOT": str(root),
         "EXTENSION_SERVICE_NATIVE_PLATFORM": "1" if local else "0",
-        "EXTENSION_SERVICE_LARGE_BUILD": "0",
+        "EXTENSION_SERVICE_LARGE_BUILD": "1" if large else "0",
         "HANDLERS_WHEELHOUSE": str(wheelhouse),
         "HANDLERS_ASSETS": str(assets),
         "HANDLERS_PACKAGES": ",".join(packages),
@@ -71,6 +75,7 @@ def _build_single(
     root,
     local: bool,
     *,
+    large: bool,
     wheelhouse: str,
     assets: str,
     packages: list[str],
@@ -83,6 +88,7 @@ def _build_single(
         extension,
         root,
         local=local,
+        large=large,
         wheelhouse=wheelhouse,
         assets=assets,
         packages=packages,
@@ -96,8 +102,9 @@ def _build_single(
     if handlers_cfg_src.is_file():
         shutil.copy2(handlers_cfg_src, handlers_cfg_dst)
     paths, manifest = _load_release_manifest(extension)
-    mode = "lambda"
-    image = f"{extension}-lambda-builder:{'local' if local else 'latest'}"
+    mode = "ecs" if large else "lambda"
+    image_kind = "ecs-builder" if large else "lambda-builder"
+    image = f"{extension}-{image_kind}:{'local' if local else 'latest'}"
     manifest["state_version"] = STATE_VERSION
     manifest["updated_at"] = utc_now_iso()
     manifest.setdefault("builds", {})
@@ -106,11 +113,13 @@ def _build_single(
         "platform": "linux/arm64" if local else "linux/amd64",
         "created_at": utc_now_iso(),
     }
-    manifest["last_build"] = {
+    last = {
         **manifest["builds"][mode],
         "mode": mode,
-        "lambda_deployment_zip": str(get_lambda_deployment_zip_path(extension, root)),
     }
+    if not large:
+        last["lambda_deployment_zip"] = str(get_lambda_deployment_zip_path(extension, root))
+    manifest["last_build"] = last
     write_json(paths.release_manifest, manifest)
     print(f"Release manifest updated ({mode}): {paths.release_manifest}")
     return 0
@@ -129,15 +138,16 @@ def _ecs_is_provisioned(extension: str) -> bool:
 
 
 def cmd_build(extension: str, args: list[str]) -> int:
-    """Build the Lambda zip from a prepare_handlers_wheelhouse output.
+    """Build Lambda and/or ECS images from a prepare_handlers_wheelhouse output.
 
     Flags:
       --wheelhouse DIR    find-links dir from prepare_handlers_wheelhouse.py
       --assets DIR        handlers-assets/ (router + configs)
       --packages a,b      ordered pip dist names (e.g. arbitium-lab,arbitium-triage)
       --local             Build as ARM64 `:local` (arch/tag only)
-      --no-ecs            Accepted for compatibility (ECS package build is not available yet)
-      --large             Rejected until large uses the same wheelhouse contract
+      --no-ecs            Skip ECS/large image even if provisioned
+      --large             Also build *-ecs-builder with [large-dependencies]
+                          (prepare with --with-large-deps first)
     """
     from pathlib import Path
 
@@ -162,16 +172,9 @@ def cmd_build(extension: str, args: list[str]) -> int:
         return 1
 
     try:
-        if "--large" in filtered_args:
-            print(
-                "ERROR: --large is not supported yet; use --no-ecs with a wheelhouse build. "
-                "ECS/large will share the same prepare→wheelhouse path.",
-                file=sys.stderr,
-            )
-            return 1
-
         build_local = "--local" in filtered_args
         skip_ecs = "--no-ecs" in filtered_args
+        force_large = "--large" in filtered_args
 
         wh_path = Path(wheelhouse).resolve() if wheelhouse else None
         assets_path = Path(assets).resolve() if assets else None
@@ -195,12 +198,19 @@ def cmd_build(extension: str, args: list[str]) -> int:
         if assets_path is not None and not assets_path.is_dir():
             print(f"ERROR: --assets not a directory: {assets_path}", file=sys.stderr)
             return 1
+        if force_large and skip_ecs:
+            print(
+                "ERROR: --large and --no-ecs conflict; omit --no-ecs to build ECS image",
+                file=sys.stderr,
+            )
+            return 1
 
-        print("==> Building Lambda zip...")
+        print("==> Building Lambda zip / lambda-builder image...")
         rc = _build_single(
             extension,
             root,
             local=build_local,
+            large=False,
             wheelhouse=str(wh_path),
             assets=str(assets_path),
             packages=packages,
@@ -208,12 +218,20 @@ def cmd_build(extension: str, args: list[str]) -> int:
         if rc != 0:
             return rc
 
-        if not skip_ecs and _ecs_is_provisioned(extension):
-            print(
-                "NOTE: ECS is provisioned but --large package build is not available yet; "
-                "Lambda zip only. Pass --no-ecs to silence this note.",
-                file=sys.stderr,
+        want_large = force_large or (not skip_ecs and _ecs_is_provisioned(extension))
+        if want_large:
+            print("==> Building ECS ecs-builder image ([large-dependencies])...")
+            rc = _build_single(
+                extension,
+                root,
+                local=build_local,
+                large=True,
+                wheelhouse=str(wh_path),
+                assets=str(assets_path),
+                packages=packages,
             )
+            if rc != 0:
+                return rc
 
         return 0
     except (FileNotFoundError, ValueError) as exc:
