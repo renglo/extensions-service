@@ -284,6 +284,27 @@ def parse_extension_repo_flag(args: list[str]) -> tuple[list[str], str | None]:
     return out, extension_repo
 
 
+def parse_extensions_flag(args: list[str]) -> tuple[list[str], list[str] | None]:
+    """Extract ``--extensions a,b,c`` (primary + extras). Returns (remaining, names|None)."""
+    out: list[str] = []
+    names: list[str] | None = None
+    i = 0
+    while i < len(args):
+        if args[i] == "--extensions":
+            if i + 1 >= len(args):
+                raise ValueError("--extensions requires a comma-separated list")
+            names = [e.strip() for e in args[i + 1].split(",") if e.strip()]
+            i += 2
+            continue
+        if args[i].startswith("--extensions="):
+            names = [e.strip() for e in args[i].split("=", 1)[1].split(",") if e.strip()]
+            i += 1
+            continue
+        out.append(args[i])
+        i += 1
+    return out, names
+
+
 def parse_extra_extensions_flag(args: list[str]) -> tuple[list[str], list[str]]:
     """Extract --extra-extensions a,b,c from build args. Returns (remaining_args, list_of_names)."""
     out: list[str] = []
@@ -303,6 +324,39 @@ def parse_extra_extensions_flag(args: list[str]) -> tuple[list[str], list[str]]:
         out.append(args[i])
         i += 1
     return out, extras
+
+
+def parse_value_flag(args: list[str], flag: str) -> tuple[list[str], str | None]:
+    """Extract ``--flag VALUE`` or ``--flag=VALUE``. Returns (remaining, value|None)."""
+    out: list[str] = []
+    value: str | None = None
+    prefix = f"{flag}="
+    i = 0
+    while i < len(args):
+        if args[i] == flag:
+            if i + 1 >= len(args):
+                raise ValueError(f"{flag} requires a value")
+            value = args[i + 1].strip()
+            i += 2
+            continue
+        if args[i].startswith(prefix):
+            value = args[i].split("=", 1)[1].strip()
+            i += 1
+            continue
+        out.append(args[i])
+        i += 1
+    return out, value or None
+
+
+def parse_packages_flag(args: list[str]) -> tuple[list[str], list[str] | None]:
+    """Extract ``--packages a,b,c`` (dist names). Returns (remaining, names|None)."""
+    filtered, raw = parse_value_flag(args, "--packages")
+    if raw is None:
+        return filtered, None
+    names = [p.strip() for p in raw.split(",") if p.strip()]
+    if not names:
+        raise ValueError("--packages requires at least one dist name")
+    return filtered, names
 
 
 def get_ecs_handlers_for_extension(extension: str, workspace_root: Path | None = None) -> list[str]:

@@ -4,66 +4,44 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_common.sh"
 
 # Build Lambda deployment package using Docker (shared script).
-# Requires: EXTENSION_NAME, WORKSPACE_ROOT in environment (set by run.py).
-# Optional: EXTENSION_REPO, DOCKER_SOURCE_COPY_PATH, PYTHON_PACKAGE, OUTPUT_STATE_DIR,
-#           DEPLOYMENT_ZIP, RENGLO_LIB_COPY_PATH (default: dev/renglo-lib).
+# Requires: EXTENSION_NAME, WORKSPACE_ROOT, HANDLERS_WHEELHOUSE, HANDLERS_ASSETS,
+# HANDLERS_PACKAGES (from prepare_handlers_wheelhouse.py).
+# Optional: OUTPUT_STATE_DIR, DEPLOYMENT_ZIP, RENGLO_LIB_COPY_PATH (default: dev/renglo-lib).
 #
-# Tooling scripts (install_handler_package_deps.py, ecs entrypoint) are staged from
-# this service's tree into .lambda_build/ so the Docker context can be a monorepo
-# (ops/extensions-service), a CI checkout (dev/extensions-service), or a compose
-# workspace that never clones the service (live run.py + WORKSPACE_ROOT).
+# ECS/--large is not supported here yet (same wheelhouse contract comes next).
 
 if [[ -z "${EXTENSION_NAME:-}" || -z "${WORKSPACE_ROOT:-}" ]]; then
   echo "ERROR: EXTENSION_NAME and WORKSPACE_ROOT must be set (run via: python run.py <env> build)" >&2
   exit 1
 fi
 
-EXTENSION_REPO="${EXTENSION_REPO:-$EXTENSION_NAME}"
-PYTHON_PACKAGE="${PYTHON_PACKAGE:-$EXTENSION_NAME}"
-DOCKER_SOURCE_COPY_PATH="${DOCKER_SOURCE_COPY_PATH:-extensions/$EXTENSION_REPO/package}"
 RENGLO_LIB_COPY_PATH="${RENGLO_LIB_COPY_PATH:-dev/renglo-lib}"
-
-# Extra extensions to bundle alongside the primary one (comma-separated, e.g. "pes,schd").
-# Set by run.py from EXTERNAL_HANDLERS in env_config.py.
-EXTRA_EXTENSIONS="${EXTRA_EXTENSIONS:-}"
-EXTRA_EXT_ARRAY=()
-if [[ -n "$EXTRA_EXTENSIONS" ]]; then
-  IFS=',' read -ra _RAW_EXTS <<< "$EXTRA_EXTENSIONS"
-  for _ext in "${_RAW_EXTS[@]}"; do
-    _ext="${_ext// /}"
-    [[ -z "$_ext" ]] && continue
-    if [[ ! -d "$WORKSPACE_ROOT/extensions/$_ext/package" ]]; then
-      echo "WARNING: Extra extension '$_ext' has no package directory — skipping." >&2
-    else
-      EXTRA_EXT_ARRAY+=("$_ext")
-    fi
-  done
-fi
+HANDLERS_WHEELHOUSE="${HANDLERS_WHEELHOUSE:-}"
+HANDLERS_ASSETS="${HANDLERS_ASSETS:-}"
+HANDLERS_PACKAGES="${HANDLERS_PACKAGES:-}"
 
 WORKSPACE_ROOT="$(cd "$WORKSPACE_ROOT" && pwd)"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SOURCE_PACKAGE_DIR="$WORKSPACE_ROOT/$DOCKER_SOURCE_COPY_PATH"
-SOURCE_PACKAGE_DIR="${SOURCE_PACKAGE_DIR%/}"
 SERVICE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# Docker paths for every extension package tree copied into the build context.
-BUNDLED_DIR_FLAGS="--bundled-dir /build/package"
-for _ext in "${EXTRA_EXT_ARRAY[@]}"; do
-  BUNDLED_DIR_FLAGS+=" --bundled-dir /build/package-${_ext}"
-done
-INSTALL_DEPS_CMD="python3.12 /build/install_handler_package_deps.py --target /build/output ${BUNDLED_DIR_FLAGS} --always-skip renglo-lib"
+BUILD_LARGE="${EXTENSION_SERVICE_LARGE_BUILD:-0}"
+if [[ "$BUILD_LARGE" == "1" ]]; then
+  echo "ERROR: ECS/--large image build is not supported yet." >&2
+  echo "  Use Lambda/small wheelhouse builds (--no-ecs --wheelhouse/--assets/--packages)." >&2
+  echo "  Large will use the same prepare→wheelhouse contract in a follow-up." >&2
+  exit 1
+fi
 
-# Build Dockerfile COPY lines and RUN steps for each extra extension.
-EXTRA_COPY_LINES=""
-EXTRA_BUILD_STEPS=""
-for _ext in "${EXTRA_EXT_ARRAY[@]}"; do
-  EXTRA_COPY_LINES="${EXTRA_COPY_LINES}COPY extensions/${_ext}/package/ /build/package-${_ext}/"$'\n'
-  EXTRA_BUILD_STEPS="${EXTRA_BUILD_STEPS}    echo \"==> Installing extra extension: ${_ext}\" && \\"$'\n'
-  EXTRA_BUILD_STEPS="${EXTRA_BUILD_STEPS}    ${INSTALL_DEPS_CMD} --package-dir /build/package-${_ext} && \\"$'\n'
-  EXTRA_BUILD_STEPS="${EXTRA_BUILD_STEPS}    cp -r /build/package-${_ext}/${_ext} /build/output/ && \\"$'\n'
-  # Merge handlers_config.json if the extra extension has one
-  EXTRA_BUILD_STEPS="${EXTRA_BUILD_STEPS}    ( [ -f /build/package-${_ext}/handlers_config.json ] && python3.12 -c \"import json, pathlib; base=pathlib.Path('/build/output/handlers_config.json'); extra=pathlib.Path('/build/package-${_ext}/handlers_config.json'); merged={**json.loads(base.read_text())['handlers'],**json.loads(extra.read_text())['handlers']}; base.write_text(json.dumps({'handlers':merged},indent=2)); print('Merged handlers_config.json with ${_ext}')\" || echo 'No handlers_config.json for ${_ext} — bundled as library only' ) && \\"$'\n'
-done
+if [[ -z "$HANDLERS_WHEELHOUSE" || -z "$HANDLERS_ASSETS" || -z "$HANDLERS_PACKAGES" ]]; then
+  echo "ERROR: handlers build requires a package wheelhouse." >&2
+  echo "  Prepare: python ops/bom-helper/scripts/prepare_handlers_wheelhouse.py \\" >&2
+  echo "             --from-monorepo extensions/<ext>/package,... --out .handlers-build" >&2
+  echo "  Build:   python ops/extensions-service/run.py <env> build --no-ecs \\" >&2
+  echo "             --wheelhouse .handlers-build/wheelhouse \\" >&2
+  echo "             --assets .handlers-build/handlers-assets \\" >&2
+  echo "             --packages <dist[,dist...]> [--local]" >&2
+  exit 1
+fi
 
 if [[ -z "${OUTPUT_STATE_DIR:-}" ]]; then
   OUTPUT_STATE_DIR=$(python3 -c "
@@ -77,40 +55,38 @@ OUTPUT_STATE_DIR="$(mkdir -p "$OUTPUT_STATE_DIR" && cd "$OUTPUT_STATE_DIR" && pw
 DEPLOYMENT_ZIP="${DEPLOYMENT_ZIP:-$OUTPUT_STATE_DIR/lambda_deployment.zip}"
 BUILD_DIR="$OUTPUT_STATE_DIR/.lambda_build"
 OUTPUT_ZIP="$DEPLOYMENT_ZIP"
-# Build for Lambda (amd64) by default; set EXTENSION_SERVICE_NATIVE_PLATFORM=1 for local-only arm64 image.
-# Set EXTENSION_SERVICE_LARGE_BUILD=1 for ECS (installs [large-dependencies] extra, outputs ecs-builder image, no zip).
-BUILD_LARGE="${EXTENSION_SERVICE_LARGE_BUILD:-0}"
+
 if [[ "${EXTENSION_SERVICE_NATIVE_PLATFORM:-0}" == "1" ]]; then
   DOCKER_PLATFORM="linux/arm64"
-  if [[ "$BUILD_LARGE" == "1" ]]; then
-    DOCKER_IMAGE="${EXTENSION_NAME}-ecs-builder:local"
-  else
-    DOCKER_IMAGE="${EXTENSION_NAME}-lambda-builder:local"
-  fi
+  DOCKER_IMAGE="${EXTENSION_NAME}-lambda-builder:local"
   EXTRACT_ZIP=false
   echo "=========================================="
-  echo "Building local-only image (arm64): $EXTENSION_NAME $([[ "$BUILD_LARGE" == "1" ]] && echo '(ECS large)' || true)"
+  echo "Building local-only image (arm64): $EXTENSION_NAME"
   echo "=========================================="
 else
   DOCKER_PLATFORM="linux/amd64"
-  if [[ "$BUILD_LARGE" == "1" ]]; then
-    DOCKER_IMAGE="${EXTENSION_NAME}-ecs-builder:latest"
-    EXTRACT_ZIP=false
-    echo "=========================================="
-    echo "Building ECS large image (amd64): $EXTENSION_NAME"
-    echo "=========================================="
-  else
-    DOCKER_IMAGE="${EXTENSION_NAME}-lambda-builder:latest"
-    EXTRACT_ZIP=true
-    echo "=========================================="
-    echo "Building Lambda Deployment Package (amd64): $EXTENSION_NAME"
-    echo "=========================================="
-  fi
+  DOCKER_IMAGE="${EXTENSION_NAME}-lambda-builder:latest"
+  EXTRACT_ZIP=true
+  echo "=========================================="
+  echo "Building Lambda Deployment Package (amd64): $EXTENSION_NAME"
+  echo "=========================================="
 fi
 echo ""
 
-if [[ ! -d "$SOURCE_PACKAGE_DIR" ]]; then
-  echo "ERROR: Source package directory not found: $SOURCE_PACKAGE_DIR" >&2
+if [[ ! -d "$HANDLERS_WHEELHOUSE" ]]; then
+  echo "ERROR: HANDLERS_WHEELHOUSE not found: $HANDLERS_WHEELHOUSE" >&2
+  exit 1
+fi
+if [[ ! -d "$HANDLERS_ASSETS" ]]; then
+  echo "ERROR: HANDLERS_ASSETS not found: $HANDLERS_ASSETS" >&2
+  exit 1
+fi
+if [[ ! -f "$HANDLERS_ASSETS/lambda_router.py" ]]; then
+  echo "ERROR: missing $HANDLERS_ASSETS/lambda_router.py" >&2
+  exit 1
+fi
+if [[ ! -f "$HANDLERS_ASSETS/handlers_config.json" ]]; then
+  echo "ERROR: missing $HANDLERS_ASSETS/handlers_config.json" >&2
   exit 1
 fi
 
@@ -129,25 +105,18 @@ fi
 
 mkdir -p "$BUILD_DIR"
 
-# Stage service tooling into the Docker context (WORKSPACE_ROOT). Compose skips
-# cloning extensions-service; monorepo may keep it under ops/ instead of dev/.
-INSTALL_DEPS_SRC="$SERVICE_ROOT/scripts/install_handler_package_deps.py"
-if [[ ! -f "$INSTALL_DEPS_SRC" ]]; then
-  echo "ERROR: Missing $INSTALL_DEPS_SRC" >&2
+echo "==> Staging wheelhouse + handlers-assets into build context..."
+rm -rf "$BUILD_DIR/wheelhouse" "$BUILD_DIR/handlers-assets"
+mkdir -p "$BUILD_DIR/wheelhouse" "$BUILD_DIR/handlers-assets"
+cp -a "$HANDLERS_WHEELHOUSE"/. "$BUILD_DIR/wheelhouse/"
+cp -a "$HANDLERS_ASSETS"/. "$BUILD_DIR/handlers-assets/"
+MERGE_CFG_SRC="$SERVICE_ROOT/scripts/merge_handlers_assets_config.py"
+if [[ ! -f "$MERGE_CFG_SRC" ]]; then
+  echo "ERROR: Missing $MERGE_CFG_SRC" >&2
   exit 1
 fi
-cp "$INSTALL_DEPS_SRC" "$BUILD_DIR/install_handler_package_deps.py"
-if [[ "$BUILD_LARGE" == "1" ]]; then
-  ECS_ENTRY_SRC="$SERVICE_ROOT/scripts/ecs_handler_entrypoint.py"
-  if [[ ! -f "$ECS_ENTRY_SRC" ]]; then
-    echo "ERROR: Missing $ECS_ENTRY_SRC" >&2
-    exit 1
-  fi
-  cp "$ECS_ENTRY_SRC" "$BUILD_DIR/ecs_handler_entrypoint.py"
-fi
+cp "$MERGE_CFG_SRC" "$BUILD_DIR/merge_handlers_assets_config.py"
 
-# Both paths already normalized via pwd (Git Bash: /c/Users/...). Avoid Windows
-# Python pathlib on those forms; strip the context prefix in bash instead.
 case "$BUILD_DIR" in
   "$WORKSPACE_ROOT"/*) BUILD_REL="${BUILD_DIR#"$WORKSPACE_ROOT"/}" ;;
   *)
@@ -164,32 +133,12 @@ fi
 
 echo "==> Using Docker to build Lambda-compatible package..."
 echo "    Service tooling staged at: $BUILD_REL/"
+echo "    Wheelhouse mode: packages=$HANDLERS_PACKAGES"
 echo ""
 
-# When BUILD_LARGE=1: inject pip install [large-dependencies] with retry (wheel-only for wheel_libs.json); no if inside container.
-# When BUILD_LARGE=0: inject zip step. This way the RUN content differs and always runs correctly.
-RUN_LARGE_DEPS_LINE=""
-if [[ "$BUILD_LARGE" == "1" ]]; then
-  WHEEL_LIBS_FILE="${SCRIPT_DIR}/../wheel_libs.json"
-  PIP_ONLY_BINARY_LIST=""
-  if [[ -f "$WHEEL_LIBS_FILE" ]]; then
-    PIP_ONLY_BINARY_LIST=$(python3 -c "import json; print(','.join(json.load(open('$WHEEL_LIBS_FILE'))))" 2>/dev/null || true)
-  fi
-  # First try: normal pip install. If it fails, retry with PIP_ONLY_BINARY for packages in wheel_libs.json. If both fail, exit 1.
-  RUN_LARGE_DEPS_LINE="    ( python3.12 -m pip install --no-cache-dir --target /build/output \"/build/package[large-dependencies]\" && ( python3.12 -c \"import sys; sys.path.insert(0,\\\"/build/output\\\"); import numpy; print(\\\"✓ large-dependencies OK\\\")\" ) ) || ( PIP_ONLY_BINARY=${PIP_ONLY_BINARY_LIST} python3.12 -m pip install --no-cache-dir --target /build/output \"/build/package[large-dependencies]\" && ( python3.12 -c \"import sys; sys.path.insert(0,\\\"/build/output\\\"); import numpy; print(\\\"✓ large-dependencies OK (wheel retry)\\\")\" ) ) || { echo \"ERROR: large-dependencies install failed or numpy missing\" >&2; exit 1; } && \\"
-fi
-if [[ "$BUILD_LARGE" == "1" ]]; then
-  RUN_ZIP_LINE='    true && \'
-else
-  RUN_ZIP_LINE='    zip -r /build/lambda_deployment.zip . -q && \'
-fi
-echo "DEBUG: BUILD_LARGE=$BUILD_LARGE RUN_LARGE_DEPS_LINE length=${#RUN_LARGE_DEPS_LINE}"
-if [[ ${#EXTRA_EXT_ARRAY[@]} -gt 0 ]]; then
-  echo "DEBUG: Extra extensions to bundle: ${EXTRA_EXT_ARRAY[*]}"
-fi
+RUN_ZIP_LINE='    zip -r /build/lambda_deployment.zip . -q && \'
+PACKAGES_SPACED="${HANDLERS_PACKAGES//,/ }"
 
-# Dockerfile with paths and RUN_LARGE_DEPS_LINE/RUN_ZIP_LINE expanded (unquoted heredoc).
-# RUN_LARGE_DEPS_LINE must sit against the next line (no blank) to avoid empty continuations.
 cat > "$BUILD_DIR/Dockerfile" << DOCKERFILE
 FROM public.ecr.aws/lambda/python:3.12
 
@@ -201,24 +150,21 @@ RUN python3.12 -m pip install --upgrade pip setuptools wheel && \\
 
 WORKDIR /build
 
-COPY ${DOCKER_SOURCE_COPY_PATH}/ /build/package/
+COPY ${BUILD_REL}/wheelhouse/ /build/wheelhouse/
+COPY ${BUILD_REL}/handlers-assets/ /build/handlers-assets/
+COPY ${BUILD_REL}/merge_handlers_assets_config.py /build/merge_handlers_assets_config.py
 COPY ${RENGLO_LIB_COPY_PATH}/ /build/renglo-lib/
-COPY ${BUILD_REL}/install_handler_package_deps.py /build/install_handler_package_deps.py
-${EXTRA_COPY_LINES}
 RUN set -e && \\
     cd /build && \\
     python3.12 -m pip install --upgrade pip setuptools wheel -q && \\
     mkdir -p /build/output && \\
     python3.12 -m pip install --no-cache-dir --target /build/output /build/renglo-lib && \\
-    python3.12 -m pip install --no-cache-dir build wheel setuptools-scm 2>&1 && \\
-    ${INSTALL_DEPS_CMD} --package-dir /build/package && \\
-${RUN_LARGE_DEPS_LINE}    echo "Checking if ${PYTHON_PACKAGE} package was installed..." && \\
-    (test -d /build/output/${PYTHON_PACKAGE} && echo "  ✓ ${PYTHON_PACKAGE} directory found" || echo "  ✗ ${PYTHON_PACKAGE} NOT found - will copy source") && \\
-    cp -r /build/package/${PYTHON_PACKAGE} /build/output/ && \\
-    cp /build/package/lambda_router.py /build/output/ && \\
-    cp /build/package/handlers_config.json /build/output/ 2>/dev/null || true && \\
+    python3.12 -m pip install --no-cache-dir --no-index --find-links=/build/wheelhouse --target /build/output ${PACKAGES_SPACED} && \\
+    cp /build/handlers-assets/lambda_router.py /build/output/ && \\
+    cp /build/handlers-assets/handlers_config.json /build/output/ && \\
+    python3.12 /build/merge_handlers_assets_config.py && \\
     python3.12 -c "import sys; sys.path.insert(0, '/build/output'); import yaml; print('✓ yaml OK')" && \\
-${EXTRA_BUILD_STEPS}    cd /build/output && \\
+    cd /build/output && \\
     find . -type d -name '__pycache__' -exec rm -rf {} + 2>/dev/null || true && \\
     find . -type f -name '*.pyc' -delete 2>/dev/null || true && \\
     find . -type d -name '*.dist-info' -exec rm -rf {} + 2>/dev/null || true && \\
@@ -228,14 +174,6 @@ ${EXTRA_BUILD_STEPS}    cd /build/output && \\
     $RUN_ZIP_LINE
     echo "Build complete!"
 DOCKERFILE
-
-if [[ "$BUILD_LARGE" == "1" ]]; then
-  cat >> "$BUILD_DIR/Dockerfile" << DOCKERFILE_ECS
-COPY ${BUILD_REL}/ecs_handler_entrypoint.py /ecs_entrypoint.py
-WORKDIR /build/output
-ENTRYPOINT ["python3.12", "/ecs_entrypoint.py"]
-DOCKERFILE_ECS
-fi
 
 echo "==> Building Docker image ($DOCKER_PLATFORM)..."
 cd "$WORKSPACE_ROOT"
@@ -273,34 +211,18 @@ if [[ "$EXTRACT_ZIP" == "true" ]]; then
   echo "Package: $OUTPUT_ZIP"
   echo "Size: $ZIP_SIZE"
   echo "Primary env: $EXTENSION_NAME"
-  if [[ "$EXTENSION_REPO" != "$EXTENSION_NAME" ]]; then
-    echo "Source repo:     $EXTENSION_REPO ($DOCKER_SOURCE_COPY_PATH)"
-    echo "Python package:  $PYTHON_PACKAGE"
-  fi
-  if [[ ${#EXTRA_EXT_ARRAY[@]} -gt 0 ]]; then
-    echo "Bundled extras:    ${EXTRA_EXT_ARRAY[*]}"
-  fi
+  echo "Packages:        $HANDLERS_PACKAGES"
   echo ""
 else
-  echo "==> Skipping zip extraction (local-only or ECS image)"
+  echo "==> Skipping zip extraction (local-only image)"
   echo ""
   echo "=========================================="
   echo "Build complete!"
   echo "=========================================="
   echo "Image: $DOCKER_IMAGE"
   echo "Primary env: $EXTENSION_NAME"
-  if [[ "$EXTENSION_REPO" != "$EXTENSION_NAME" ]]; then
-    echo "Source repo:     $EXTENSION_REPO ($DOCKER_SOURCE_COPY_PATH)"
-    echo "Python package:  $PYTHON_PACKAGE"
-  fi
-  if [[ ${#EXTRA_EXT_ARRAY[@]} -gt 0 ]]; then
-    echo "Bundled extras:    ${EXTRA_EXT_ARRAY[*]}"
-  fi
-  if [[ "$BUILD_LARGE" == "1" ]]; then
-    echo "(ECS large image; deploy with --type ecs)"
-  else
-    echo "(use with run-local and EXTENSION_SERVICE_NATIVE_PLATFORM=1)"
-  fi
+  echo "Packages:        $HANDLERS_PACKAGES"
+  echo "(use with run-local and EXTENSION_SERVICE_NATIVE_PLATFORM=1)"
   echo ""
 fi
 
