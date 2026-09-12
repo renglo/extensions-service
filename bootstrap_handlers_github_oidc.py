@@ -36,6 +36,7 @@ class HandlersBootstrapConfig:
     github_owner_id: str | None = None
     github_repo_id: str | None = None
     ecs_results_bucket: str | None = None
+    codeartifact_domain_owner: str | None = None
     apply_changes: bool = True
     state_out_path: Path | None = None
 
@@ -146,11 +147,15 @@ def run(config: HandlersBootstrapConfig) -> dict[str, Any]:
     _ensure_oidc_provider(iam, oidc_provider_arn, config.apply_changes)
 
     ecs_bucket = config.ecs_results_bucket or f"{config.extension}-handlers-ecs-{account_id}"
+    codeartifact_domain_owner = (
+        (config.codeartifact_domain_owner or "").strip() or account_id
+    )
     policy_replacements: dict[str, str] = {
         "EXTENSION_NAME": config.extension,
         "AWS_ACCOUNT": account_id,
         "AWS_REGION": config.aws_region,
         "ECS_RESULTS_BUCKET": ecs_bucket,
+        "CODEARTIFACT_DOMAIN_OWNER": codeartifact_domain_owner,
     }
     permissions_policy = _render_template(_POLICY_TEMPLATE, policy_replacements)
 

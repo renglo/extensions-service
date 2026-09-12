@@ -71,6 +71,65 @@ def handlers_results_bucket_name(env_name: str, account: str) -> str:
     return f"{env_name}-handlers-ecs-{account}"
 
 
+def _codeartifact_read_statements(
+    region: str,
+    account: str,
+    package_registry: dict | None = None,
+) -> list[iam.PolicyStatement]:
+    """Allow the handlers GitHub OIDC role to pip-install from CodeArtifact.
+
+    Same-account pull is always granted. Set package_registry.domain_owner (or
+    domain_owners) when wheels live in another AWS account.
+    """
+    owners = [account]
+    if isinstance(package_registry, dict):
+        extra = str(package_registry.get("domain_owner") or "").strip()
+        if extra and extra not in owners:
+            owners.append(extra)
+        for item in package_registry.get("domain_owners") or []:
+            owner = str(item or "").strip()
+            if owner and owner not in owners:
+                owners.append(owner)
+
+    resources: list[str] = []
+    for owner in owners:
+        resources.extend(
+            [
+                f"arn:aws:codeartifact:{region}:{owner}:domain/*",
+                f"arn:aws:codeartifact:{region}:{owner}:repository/*/*",
+                f"arn:aws:codeartifact:{region}:{owner}:package/*/*/*/*",
+            ]
+        )
+    return [
+        iam.PolicyStatement(
+            sid="CodeArtifactRead",
+            actions=[
+                "codeartifact:DescribeDomain",
+                "codeartifact:GetAuthorizationToken",
+                "codeartifact:GetRepositoryEndpoint",
+                "codeartifact:ReadFromRepository",
+                "codeartifact:DescribeRepository",
+                "codeartifact:ListPackages",
+                "codeartifact:ListPackageVersions",
+                "codeartifact:DescribePackageVersion",
+                "codeartifact:GetPackageVersionAsset",
+                "codeartifact:GetPackageVersionReadme",
+                "codeartifact:ListPackageVersionAssets",
+                "codeartifact:ListPackageVersionDependencies",
+            ],
+            resources=resources,
+        ),
+        iam.PolicyStatement(
+            sid="CodeArtifactBearerToken",
+            actions=["sts:GetServiceBearerToken"],
+            resources=["*"],
+            conditions={
+                "StringEquals": {"sts:AWSServiceName": "codeartifact.amazonaws.com"}
+            },
+        ),
+    ]
+
+
 def _handlers_managed_policy_document(
     env_name: str,
     region: str,
@@ -184,6 +243,7 @@ def _handlers_oidc_policy(
     account: str,
     *,
     ecs_results_bucket: str,
+    package_registry: dict | None = None,
 ) -> iam.PolicyDocument:
     """Permissions for the handlers-repo GitHub Actions OIDC deploy role.
 
@@ -203,6 +263,7 @@ def _handlers_oidc_policy(
                 actions=["ecr:GetAuthorizationToken"],
                 resources=["*"],
             ),
+            *_codeartifact_read_statements(region, account, package_registry),
             iam.PolicyStatement(
                 sid="EcrPushScoped",
                 actions=[
@@ -333,6 +394,7 @@ class ComputeStack(Construct):
         enable_staging: bool = True,
         tenant_policy: iam.IManagedPolicy | None = None,
         handlers_network_params: dict[str, Any] | None = None,
+        package_registry: dict | None = None,
         **kwargs,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
@@ -362,6 +424,7 @@ class ComputeStack(Construct):
                 github_handlers_repo_id=github_handlers_repo_id,
                 enable_staging=enable_staging,
                 ecs_results_bucket=results_bucket_name,
+                package_registry=package_registry,
             )
             return
 
@@ -593,6 +656,7 @@ class ComputeStack(Construct):
             github_handlers_repo_id=github_handlers_repo_id,
             enable_staging=enable_staging,
             ecs_results_bucket=bucket_name,
+            package_registry=package_registry,
         )
 
     def _provision_handlers_oidc(
@@ -607,6 +671,7 @@ class ComputeStack(Construct):
         github_handlers_repo_id: str | None = None,
         enable_staging: bool,
         ecs_results_bucket: str,
+        package_registry: dict | None = None,
     ) -> None:
         if not github_handlers_repo.strip():
             return
@@ -624,6 +689,7 @@ class ComputeStack(Construct):
             aws_region,
             aws_account,
             ecs_results_bucket=ecs_results_bucket,
+            package_registry=package_registry,
         )
 
         def _handlers_oidc_role(stage: str) -> iam.Role:
