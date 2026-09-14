@@ -378,7 +378,7 @@ flowchart LR
   P -->|"writes state/"| LambdaExport[(lambda_env_export.json)]
   OIDC -->|"writes state/"| OidcState[(handlers_github_oidc.json)]
   B -->|"reads extensions/"| PyToml[(pyproject.toml)]
-  B -->|"reads dev/"| Renglo[(renglo-lib)]
+  B -->|"reads wheelhouse"| Wheels[(renglo-lib + handler pins)]
   B -->|"writes state/"| Release[(release_manifest.json)]
   B -->|"writes state/"| Zip[(lambda_deployment.zip)]
   U -->|"reads state/"| StateProv

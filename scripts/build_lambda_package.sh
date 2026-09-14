@@ -5,12 +5,13 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_common.sh"
 
 # Build handlers images from prepare_handlers_wheelhouse.py output.
 # Requires: EXTENSION_NAME, WORKSPACE_ROOT, HANDLERS_WHEELHOUSE, HANDLERS_ASSETS,
-# HANDLERS_PACKAGES.
-# Optional: OUTPUT_STATE_DIR, DEPLOYMENT_ZIP, RENGLO_LIB_COPY_PATH (default: dev/renglo-lib),
+# HANDLERS_PACKAGES (comma-separated dist names, including renglo-lib when pinned).
+# Optional: OUTPUT_STATE_DIR, DEPLOYMENT_ZIP,
 #           EXTENSION_SERVICE_LARGE_BUILD=1 for ECS/*-ecs-builder (no zip).
 #
-# Large uses the same wheelhouse; prepare with --with-large-deps so
-# name[large-dependencies] wheels are present. AWS async/batch uses this image's
+# All packages (including renglo-lib) install from the wheelhouse — no git clone
+# of dev/renglo-lib. Large uses the same wheelhouse; prepare with --with-large-deps
+# so name[large-dependencies] wheels are present. AWS async/batch uses this image's
 # ecs_handler_entrypoint.py. Local Docker async/batch is out of scope.
 
 if [[ -z "${EXTENSION_NAME:-}" || -z "${WORKSPACE_ROOT:-}" ]]; then
@@ -18,7 +19,6 @@ if [[ -z "${EXTENSION_NAME:-}" || -z "${WORKSPACE_ROOT:-}" ]]; then
   exit 1
 fi
 
-RENGLO_LIB_COPY_PATH="${RENGLO_LIB_COPY_PATH:-dev/renglo-lib}"
 HANDLERS_WHEELHOUSE="${HANDLERS_WHEELHOUSE:-}"
 HANDLERS_ASSETS="${HANDLERS_ASSETS:-}"
 HANDLERS_PACKAGES="${HANDLERS_PACKAGES:-}"
@@ -97,12 +97,6 @@ if [[ ! -f "$HANDLERS_ASSETS/lambda_router.py" ]]; then
 fi
 if [[ ! -f "$HANDLERS_ASSETS/handlers_config.json" ]]; then
   echo "ERROR: missing $HANDLERS_ASSETS/handlers_config.json" >&2
-  exit 1
-fi
-
-if [[ ! -d "$WORKSPACE_ROOT/$RENGLO_LIB_COPY_PATH" ]]; then
-  echo "ERROR: renglo-lib not found at $WORKSPACE_ROOT/$RENGLO_LIB_COPY_PATH" >&2
-  echo "Set RENGLO_LIB_COPY_PATH or place the clone under the Docker context." >&2
   exit 1
 fi
 
@@ -201,12 +195,10 @@ COPY ${BUILD_REL}/wheelhouse/ /build/wheelhouse/
 COPY ${BUILD_REL}/handlers-assets/ /build/handlers-assets/
 COPY ${BUILD_REL}/merge_handlers_assets_config.py /build/merge_handlers_assets_config.py
 ${EXTRA_COPY}
-COPY ${RENGLO_LIB_COPY_PATH}/ /build/renglo-lib/
 RUN set -e && \\
     cd /build && \\
     python3.12 -m pip install --upgrade pip setuptools wheel -q && \\
     mkdir -p /build/output && \\
-    python3.12 -m pip install --no-cache-dir --target /build/output /build/renglo-lib && \\
     python3.12 -m pip install --no-cache-dir --no-index --find-links=/build/wheelhouse --target /build/output ${PACKAGES_SPACED} && \\
 ${LARGE_INSTALL_LINE}
     cp /build/handlers-assets/lambda_router.py /build/output/ && \\

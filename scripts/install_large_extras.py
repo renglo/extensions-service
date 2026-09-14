@@ -12,11 +12,35 @@ import subprocess
 import sys
 
 
+# Core / shared pins: install from wheelhouse in the main pip step, but they do
+# not declare [large-dependencies]. Only extension handler dists get that extra.
+_SKIP_LARGE_PREFIXES = ("renglo-lib", "renglo-api", "renglo-ci")
+
+
+def _wants_large_extra(name: str) -> bool:
+    n = name.strip().lower()
+    if not n:
+        return False
+    if n in _SKIP_LARGE_PREFIXES or n.startswith("renglo-lib"):
+        return False
+    # Shared renglo-* libs (gro, data, …) are deps; large extras live on lab/triage.
+    if n.startswith("renglo-"):
+        return False
+    return True
+
+
 def main() -> int:
-    pkgs = [p.strip() for p in os.environ.get("HANDLERS_PACKAGES", "").split(",") if p.strip()]
+    pkgs = [
+        p.strip()
+        for p in os.environ.get("HANDLERS_PACKAGES", "").split(",")
+        if _wants_large_extra(p)
+    ]
     if not pkgs:
-        print("ERROR: HANDLERS_PACKAGES is empty", file=sys.stderr)
-        return 1
+        print(
+            "WARNING: no handler packages eligible for [large-dependencies]; skipping",
+            file=sys.stderr,
+        )
+        return 0
 
     only_binary: list[str] = []
     libs_path = "/build/wheel_libs.json"
