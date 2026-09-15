@@ -123,18 +123,20 @@ cp "$MERGE_CFG_SRC" "$BUILD_DIR/merge_handlers_assets_config.py"
 
 ENTRYPOINT_SRC="$SERVICE_ROOT/scripts/ecs_handler_entrypoint.py"
 INSTALL_LARGE_SRC="$SERVICE_ROOT/scripts/install_large_extras.py"
+CORE_PACKAGES_SRC="$SERVICE_ROOT/scripts/handlers_core_packages.py"
 WHEEL_LIBS_SRC="$SERVICE_ROOT/wheel_libs.json"
 if [[ "$BUILD_LARGE" == "1" ]]; then
   if [[ ! -f "$ENTRYPOINT_SRC" ]]; then
     echo "ERROR: Missing $ENTRYPOINT_SRC" >&2
     exit 1
   fi
-  if [[ ! -f "$INSTALL_LARGE_SRC" ]]; then
-    echo "ERROR: Missing $INSTALL_LARGE_SRC" >&2
+  if [[ ! -f "$INSTALL_LARGE_SRC" || ! -f "$CORE_PACKAGES_SRC" ]]; then
+    echo "ERROR: Missing $INSTALL_LARGE_SRC or $CORE_PACKAGES_SRC" >&2
     exit 1
   fi
   cp "$ENTRYPOINT_SRC" "$BUILD_DIR/ecs_handler_entrypoint.py"
   cp "$INSTALL_LARGE_SRC" "$BUILD_DIR/install_large_extras.py"
+  cp "$CORE_PACKAGES_SRC" "$BUILD_DIR/handlers_core_packages.py"
   if [[ -f "$WHEEL_LIBS_SRC" ]]; then
     cp "$WHEEL_LIBS_SRC" "$BUILD_DIR/wheel_libs.json"
   else
@@ -164,20 +166,19 @@ echo ""
 PACKAGES_SPACED="${HANDLERS_PACKAGES//,/ }"
 
 if [[ "$BUILD_LARGE" == "1" ]]; then
-  FINAL_LINES='    cp /build/ecs_handler_entrypoint.py /build/output/ecs_handler_entrypoint.py && \
-    echo "ECS image build complete!"'
+  FINAL_LINES='cp /build/ecs_handler_entrypoint.py /build/output/ecs_handler_entrypoint.py; echo "ECS image build complete!"'
   DOCKER_TAIL='WORKDIR /build/output
 ENTRYPOINT ["python3.12", "/build/output/ecs_handler_entrypoint.py"]'
   EXTRA_COPY="COPY ${BUILD_REL}/ecs_handler_entrypoint.py /build/ecs_handler_entrypoint.py
 COPY ${BUILD_REL}/install_large_extras.py /build/install_large_extras.py
+COPY ${BUILD_REL}/handlers_core_packages.py /build/handlers_core_packages.py
 COPY ${BUILD_REL}/wheel_libs.json /build/wheel_libs.json"
-  LARGE_INSTALL_LINE='    HANDLERS_PACKAGES='"${HANDLERS_PACKAGES}"' python3.12 /build/install_large_extras.py && \'
+  LARGE_INSTALL_LINE="    HANDLERS_PACKAGES=${HANDLERS_PACKAGES} python3.12 /build/install_large_extras.py; \\"
 else
-  FINAL_LINES='    zip -r /build/lambda_deployment.zip . -q && \
-    echo "Build complete!"'
+  FINAL_LINES='zip -r /build/lambda_deployment.zip . -q; echo "Build complete!"'
   DOCKER_TAIL=''
   EXTRA_COPY=''
-  LARGE_INSTALL_LINE=''
+  LARGE_INSTALL_LINE="    :; \\"
 fi
 
 cat > "$BUILD_DIR/Dockerfile" << DOCKERFILE
@@ -195,23 +196,23 @@ COPY ${BUILD_REL}/wheelhouse/ /build/wheelhouse/
 COPY ${BUILD_REL}/handlers-assets/ /build/handlers-assets/
 COPY ${BUILD_REL}/merge_handlers_assets_config.py /build/merge_handlers_assets_config.py
 ${EXTRA_COPY}
-RUN set -e && \\
-    cd /build && \\
-    python3.12 -m pip install --upgrade pip setuptools wheel -q && \\
-    mkdir -p /build/output && \\
-    python3.12 -m pip install --no-cache-dir --no-index --find-links=/build/wheelhouse --target /build/output ${PACKAGES_SPACED} && \\
+RUN set -eux; \\
+    cd /build; \\
+    python3.12 -m pip install --upgrade pip setuptools wheel -q; \\
+    mkdir -p /build/output; \\
+    python3.12 -m pip install --no-cache-dir --no-index --find-links=/build/wheelhouse --target /build/output ${PACKAGES_SPACED}; \\
 ${LARGE_INSTALL_LINE}
-    cp /build/handlers-assets/lambda_router.py /build/output/ && \\
-    cp /build/handlers-assets/handlers_config.json /build/output/ && \\
-    python3.12 /build/merge_handlers_assets_config.py && \\
-    python3.12 -c "import sys; sys.path.insert(0, '/build/output'); import yaml; print('✓ yaml OK')" && \\
-    cd /build/output && \\
-    find . -type d -name '__pycache__' -exec rm -rf {} + 2>/dev/null || true && \\
-    find . -type f -name '*.pyc' -delete 2>/dev/null || true && \\
-    find . -type d -name '*.dist-info' -exec rm -rf {} + 2>/dev/null || true && \\
-    find . -type d -name '*.egg-info' -exec rm -rf {} + 2>/dev/null || true && \\
-    find . -type f -name '*.md' -delete 2>/dev/null || true && \\
-    find . -type d -name 'examples' -exec rm -rf {} + 2>/dev/null || true && \\
+    cp /build/handlers-assets/lambda_router.py /build/output/; \\
+    cp /build/handlers-assets/handlers_config.json /build/output/; \\
+    python3.12 /build/merge_handlers_assets_config.py; \\
+    python3.12 -c "import sys; sys.path.insert(0, '/build/output'); import yaml; print('OK yaml')"; \\
+    cd /build/output; \\
+    find . -type d -name '__pycache__' -exec rm -rf {} + 2>/dev/null || true; \\
+    find . -type f -name '*.pyc' -delete 2>/dev/null || true; \\
+    find . -type d -name '*.dist-info' -exec rm -rf {} + 2>/dev/null || true; \\
+    find . -type d -name '*.egg-info' -exec rm -rf {} + 2>/dev/null || true; \\
+    find . -type f -name '*.md' -delete 2>/dev/null || true; \\
+    find . -type d -name 'examples' -exec rm -rf {} + 2>/dev/null || true; \\
     ${FINAL_LINES}
 ${DOCKER_TAIL}
 DOCKERFILE

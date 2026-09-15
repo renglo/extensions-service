@@ -337,7 +337,9 @@ In `extensions/<name>/package/pyproject.toml`:
 - **`[project.dependencies]`** — Lambda zip (keep small)
 - **`[project.optional-dependencies] large-dependencies`** — heavy libs for `build --large` / ECS image
 
-If `pip install` fails, the build retries with `--only-binary` for packages in `dev/extensions-service/wheel_libs.json`.
+Prepare and the ECS image install step only apply `[large-dependencies]` when the wheelhouse artifact declares that extra (`Provides-Extra` / optional-dependencies). Packages without it (e.g. triage, gro) are skipped. Shared runtime pins listed in `scripts/handlers_core_packages.py` (today: `renglo-lib`) always install in the base pip step and are never large-extra candidates.
+
+If `pip install` fails, the build retries with `--only-binary` for packages in `wheel_libs.json`.
 
 ---
 

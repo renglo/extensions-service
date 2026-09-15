@@ -21,7 +21,7 @@ Do **not** reimplement Docker/zip in renglo-ci or BOM scripts. Do **not** materi
 
 **`--local`** only selects platform/tag (`linux/arm64` + `:local`).
 
-**`--large`** builds Lambda/small first, then `*-ecs-builder` with `[large-dependencies]`. Prepare with `--with-large-deps` so heavy wheels are in the house.
+**`--large`** builds Lambda/small first, then `*-ecs-builder` with `[large-dependencies]`. Prepare with `--with-large-deps` so heavy wheels are in the house. Only dists whose artifacts declare `Provides-Extra: large-dependencies` (from `pyproject` optional-dependencies) get that extra; core runtime pins such as `renglo-lib` install in the base pip step only.
 
 Local Docker **async/batch** is out of scope. Local smoke for large = **sync** invoke against `*-ecs-builder`.
 
