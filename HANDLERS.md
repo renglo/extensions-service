@@ -53,7 +53,9 @@ python run.py arbitium build --large \
 
 Expect both `arbitium-lambda-builder:latest` and `arbitium-ecs-builder:latest`.
 
-Prepare downloads **manylinux** wheels by default so a Windows host does not poison the wheelhouse for Lambda/ECS. Private deps (e.g. `renglo-gro`) need CodeArtifact or `--from-artifacts`.
+Prepare downloads pins + transitive deps like backend CI (wheels and sdists; no
+`--only-binary`). Run on Linux (Actions / WSL). Private pins need CodeArtifact or
+`--from-artifacts`. Windows host prepare for Lambda-safe houses → renglo-ci (deprecated - future implementation).
 
 `--packages` are **PyPI / dist names**, not folder handles.
 
