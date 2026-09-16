@@ -1,6 +1,8 @@
 # Extension service (provision-infra + deploy + runtime-config)
 
-Manages the full lifecycle of extension handler deployments across three permission stages, each with a local source of truth under `dev/extensions-service/state/<env>/`.
+Manages the full lifecycle of extension handler deployments across three permission stages, each with a local source of truth under `dev/extensions-service/state/<env>/` (or next to this package under `ops/extensions-service/state/<env>/` in the monorepo).
+
+**Handlers packaging (1 image, N dists):** see [HANDLERS.md](HANDLERS.md) — prepare wheelhouse then `run.py build --wheelhouse/--assets/--packages`. Deploy happy path is **BOM Actions + SSM**.
 
 Short deploy-flow diagram: [DEPLOY_FLOW.md].
 
@@ -42,10 +44,26 @@ Provisions handlers IAM + Lambda path only (no ECS cluster, ECR, or S3 results b
 2. **Build** the Lambda zip (written to `extensions-service/state`)
 
   ```bash
-  python3 dev/extensions-service/run.py <env> build
-  # When <env> and extension have different names:
-  python3 dev/extensions-service/run.py <env> build --extension-repo <extension_name>
+  # Prepare wheelhouse (monorepo DX) — see HANDLERS.md
+  python3 ops/bom-helper/scripts/prepare_handlers_wheelhouse.py \
+    --from-monorepo extensions/arbitium/package,extensions/arbitiumtriage/package \
+    --out .handlers-build
+  python3 ops/extensions-service/run.py <env> build --no-ecs \
+    --wheelhouse .handlers-build/wheelhouse \
+    --assets .handlers-build/handlers-assets \
+    --packages arbitium-lab,arbitium-triage
+  # Local ARM image for run-local (Linux): add --local (arch/tag only)
   ```
+
+  Handlers packaging details: [HANDLERS.md](HANDLERS.md).
+
+  `WORKSPACE_ROOT` overrides the repo root (default: parent of `dev/` or `ops/`).
+  `renglo-ci compose handlers-build` sets it to an isolated tree of unpublished
+  packages so this service can build without copying itself into that tree.
+  Build state (Dockerfile, zip, `.lambda_build`) then lands under
+  `$WORKSPACE_ROOT/dev/extensions-service/state/<env>/` so `docker build -f`
+  and the context are the same tree. Deploy/provision on the live clone still
+  use `dev/extensions-service/state/<env>/`.
 
   3. **Deploy** the zip to AWS Lambda
 
@@ -67,12 +85,25 @@ Provisions handlers IAM plus ECS cluster, ECR, and S3 results bucket. Uses the d
     --github-repo <org>/<handlers-repo> #Optional
   ```
 
-2. **Build** the Lambda zip and the ECS Docker image (heavy dependencies)
+2. **Build** the Lambda zip (and optionally ECS image) from a prepared wheelhouse (see [HANDLERS.md](HANDLERS.md))
 
   ```bash
-  python3 dev/extensions-service/run.py <env> build --large
-  python3 dev/extensions-service/run.py <env> build --large --extension-repo <extension_name>
-  python3 dev/extensions-service/run.py <env> build --large --extension-repo <extension_name> --extra-extensions <ext1>,<ext2>
+  python3 ops/bom-helper/scripts/prepare_handlers_wheelhouse.py \
+    --from-monorepo extensions/arbitium/package,extensions/arbitiumtriage/package \
+    --out .handlers-build
+  python3 ops/extensions-service/run.py <env> build --no-ecs \
+    --wheelhouse .handlers-build/wheelhouse \
+    --assets .handlers-build/handlers-assets \
+    --packages arbitium-lab,arbitium-triage
+
+  # ECS / large (add --with-large-deps on prepare, then --large on build):
+  python3 ops/bom-helper/scripts/prepare_handlers_wheelhouse.py \
+    --from-monorepo extensions/arbitium/package,extensions/arbitiumtriage/package \
+    --with-large-deps --out .handlers-build
+  python3 ops/extensions-service/run.py <env> build --large \
+    --wheelhouse .handlers-build/wheelhouse \
+    --assets .handlers-build/handlers-assets \
+    --packages arbitium-lab,arbitium-triage
   ```
 
 3. **Deploy** Lambda (zip) and push the ECS image (ECR + task definition)
@@ -144,8 +175,8 @@ Stage 2 has two publish paths: Lambda (zip) and ECS (Docker image). Docker is a 
 
 | Target | Build | Publish to AWS |
 |--------|-------|----------------|
-| Handlers Lambda | `build` | `deploy deploy` / `deploy update` |
-| Handlers ECS| `build` (auto if ECS provisioned) or `build --large` | `deploy push` |
+| Handlers Lambda | `build --wheelhouse/...` (always) | `deploy deploy` / `deploy update` |
+| Handlers ECS | `build --large` (or auto if ECS provisioned) | `deploy push` |
 
 `deploy push` does not deploy Lambda. For Lambda-only environments, stop after `deploy deploy`.
 
@@ -155,28 +186,35 @@ Optional: `provision_manifest.json` in state supplements deploy push (cluster, l
 
 ### `build` / `deploy build`
 
-`build` always produces the Lambda zip (light image). With ECS provisioned, it also builds the ECS image unless you pass `--no-ecs`.
-
-**`build --large`** builds both artifacts in one run: the light Lambda zip (for `deploy deploy` → AWS Lambda) and the "heavy" Docker image with `[large-dependencies]` (for `deploy push` → ECR → ECS tasks). Use it for Lambda + ECS workflows so you do not need separate build commands.
+`build` always produces the Lambda zip / `*-lambda-builder` from a **prepared wheelhouse** (`--wheelhouse`, `--assets`, `--packages`). Pass `--large` (or leave ECS auto-detect on) for `*-ecs-builder` with `[large-dependencies]` — prepare with `--with-large-deps` first. `--no-ecs` skips the ECS image.
 
 ```bash
-python3 dev/extensions-service/run.py <env> build
+# See HANDLERS.md — prepare wheelhouse first, then:
+python3 ops/extensions-service/run.py <env> build --no-ecs \
+  --wheelhouse .handlers-build/wheelhouse \
+  --assets .handlers-build/handlers-assets \
+  --packages arbitium-lab,arbitium-triage
+
+python3 ops/extensions-service/run.py <env> build --large \
+  --wheelhouse .handlers-build/wheelhouse \
+  --assets .handlers-build/handlers-assets \
+  --packages arbitium-lab,arbitium-triage
 ```
 
-**Optional:**
+**Flags:**
 
 | Flag | When to use |
 |------|-------------|
-| `--extension-repo` | Handler source folder when it differs from `<env>` |
-| `--extra-extensions` | Comma-separated extra extensions to bundle alongside the primary one. Their Python packages, dependencies, and `handlers_config.json` entries are merged into the artifact. |
-| `--large` | Force ECS image build (heavy deps) even before ECS is provisioned, or when you want zip + ECS image together |
-| `--no-ecs` | Lambda zip only, skip ECS image even if `provision_manifest.json` has ECS |
-| `--local` | Lambda zip for `run-local` on arm64 (ECS image stays amd64) |
+| `--wheelhouse` / `--assets` / `--packages` | **Required.** From `prepare_handlers_wheelhouse.py`; `--packages` are dist names. |
+| `--large` | Also build `*-ecs-builder` with `[large-dependencies]` |
+| `--no-ecs` | Skip ECS image even if provisioned |
+| `--local` | Lambda/ECS platform/tag arm64 `:local` |
 
 | Build output | Used by |
 |--------------|---------|
 | `extensions-service/state/<env>/lambda_deployment.zip` | `deploy deploy` / `deploy update` |
-| `<env>-ecs-builder:latest` image | `deploy push` |
+| `<env>-lambda-builder:latest` | Local DEV_DOCKER sync (Lambda) |
+| `<env>-ecs-builder:latest` | `deploy push` / ECS async; local sync smoke for ECS handlers |
 
 ### `deploy deploy` / `deploy update` / `deploy undeploy`
 
@@ -196,6 +234,8 @@ python3 dev/extensions-service/run.py <env> deploy deploy \
 | `deploy undeploy` | Remove the Lambda function |
 | `--type ecs` | Legacy: build large image + run ECS push in one step (prefer `build --large` + `deploy push`) |
 | `--type default` | Zip Lambda, then ECS if extension config lists ECS handlers |
+
+**Large Lambda packages (>50 MB zipped):** `deploy_as_a_service.sh` uploads to `VARS.S3_BUCKET_NAME` from `deploy_input.json` and calls `create-function` / `update-function-code` with `--s3-bucket` / `--s3-key`. The GitHub handlers OIDC role needs `s3:PutObject` on that bucket (in addition to the ECS results bucket). Override with `LAMBDA_DEPLOY_S3_BUCKET`; force S3 with `LAMBDA_FORCE_S3_UPLOAD=1`.
 
 ### `deploy push`
 
@@ -276,13 +316,15 @@ All under `dev/extensions-service/state/<env>/` — gitignored except `state/sch
 
 ---
 
-## Per-extension repo layout
+## Per-extension package layout
 
-**Platform env vs handler repo:** `<env>` names state and AWS resources. Handler code may live under a different folder; use `build --extension-repo <folder>` when it does (aligned with bootstrap `--extension-specific` for provision).
+**Platform env vs packages:** `<env>` names state and AWS resources. Handler code
+is installed from dist names via `--packages` (not monorepo folder COPY).
 
 | Path | Role |
 |------|------|
-| `<folder>/package/` or `extensions/<folder>/package/` | Handler source (`pyproject.toml`, `handlers_config.json`) — selected via `build --extension-repo` |
+| `extensions/<name>/package/` | Source for `prepare_handlers_wheelhouse --from-monorepo` / published sdists |
+| `.handlers-build/wheelhouse` + `handlers-assets` | Prepare output consumed by `run.py build` |
 | `extensions-service/state/<env>/lambda_deployment.zip` | Build output consumed by deploy |
 | `extensions-service/state/<env>/` | Manifests + deploy input (gitignored except `schemas/`) |
 
@@ -293,9 +335,11 @@ All under `dev/extensions-service/state/<env>/` — gitignored except `state/sch
 In `extensions/<name>/package/pyproject.toml`:
 
 - **`[project.dependencies]`** — Lambda zip (keep small)
-- **`[project.optional-dependencies] large-dependencies`** — heavy libs for `build --large` / ECS image only
+- **`[project.optional-dependencies] large-dependencies`** — heavy libs for `build --large` / ECS image
 
-If `pip install` fails, the build retries with `--only-binary` for packages in `dev/extensions-service/wheel_libs.json`.
+Prepare and the ECS image install step only apply `[large-dependencies]` when the wheelhouse artifact declares that extra (`Provides-Extra` / optional-dependencies). Packages without it (e.g. triage, gro) are skipped. Shared runtime pins listed in `scripts/handlers_core_packages.py` (today: `renglo-lib`) always install in the base pip step and are never large-extra candidates.
+
+If `pip install` fails, the build retries with `--only-binary` for packages in `wheel_libs.json`.
 
 ---
 
@@ -336,7 +380,7 @@ flowchart LR
   P -->|"writes state/"| LambdaExport[(lambda_env_export.json)]
   OIDC -->|"writes state/"| OidcState[(handlers_github_oidc.json)]
   B -->|"reads extensions/"| PyToml[(pyproject.toml)]
-  B -->|"reads dev/"| Renglo[(renglo-lib)]
+  B -->|"reads wheelhouse"| Wheels[(renglo-lib + handler pins)]
   B -->|"writes state/"| Release[(release_manifest.json)]
   B -->|"writes state/"| Zip[(lambda_deployment.zip)]
   U -->|"reads state/"| StateProv

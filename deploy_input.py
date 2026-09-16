@@ -31,6 +31,9 @@ _LAMBDA_RUNTIME = "python3.12"
 _LAMBDA_TIMEOUT = 900
 _LAMBDA_MEMORY_SIZE = 3008
 
+# AWS Lambda direct upload limit for --zip-file (compressed deployment package).
+LAMBDA_DIRECT_UPLOAD_MAX_BYTES = 50 * 1024 * 1024
+
 
 def resolve_deploy_input_file(extension: str, workspace_root: Path | None = None) -> Path | None:
     """
@@ -146,6 +149,22 @@ def get_ecr_image_uri_from_payload(payload: dict[str, Any]) -> str | None:
     vars_block = payload.get("VARS") or {}
     uri = vars_block.get("ECR_IMAGE_URI")
     return str(uri) if uri else None
+
+
+def get_s3_bucket_name_from_payload(payload: dict[str, Any]) -> str | None:
+    """Tenant deploy bucket from deploy_input VARS (used for large Lambda zip uploads)."""
+    validate_deploy_input_payload(payload)
+    name = str((payload.get("VARS") or {}).get("S3_BUCKET_NAME") or "").strip()
+    return name or None
+
+
+def get_s3_bucket_name_from_deploy_input(
+    extension: str, workspace_root: Path | None = None
+) -> str | None:
+    payload = load_deploy_input_payload(extension, workspace_root)
+    if not payload:
+        return None
+    return get_s3_bucket_name_from_payload(payload)
 
 
 def deploy_input_from_path(path: Path) -> dict[str, Any]:

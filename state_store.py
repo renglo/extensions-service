@@ -15,10 +15,28 @@ STATE_VERSION = 1
 def get_extensions_service_root() -> Path:
     """
     Directory of this package (the folder containing state_store.py), e.g. .../extensions-service/.
-    State files live under <this>/state/<extension>/ regardless of whether the package sits under
-    dev/, infra-installer/, or elsewhere in the repo tree.
+    When the workspace is this clone, state lives under <this>/state/<extension>/.
+    An isolated WORKSPACE_ROOT (compose) keeps build artifacts under that tree instead.
     """
     return Path(__file__).resolve().parent
+
+
+def default_repo_root() -> Path:
+    """Repo root implied by this package: ``extensions-service/../..``."""
+    return get_extensions_service_root().parent.parent
+
+
+def resolve_state_dir(extension: str, workspace_root: Path) -> Path:
+    """Per-env state directory for manifests and Docker build files.
+
+    Same clone as this package: ``<service>/state/<env>/`` (deploy/CI).
+    Isolated workspace: ``<workspace>/dev/extensions-service/state/<env>/`` so
+    ``docker build -f`` and the context share one tree.
+    """
+    root = workspace_root.resolve()
+    if root == default_repo_root().resolve():
+        return get_extensions_service_root() / "state" / extension
+    return root / "dev" / "extensions-service" / "state" / extension
 
 
 def utc_now_iso() -> str:
@@ -40,8 +58,8 @@ class ExtensionStatePaths:
 
 
 def get_state_paths(extension: str, workspace_root: Path | None = None) -> ExtensionStatePaths:
-    root = workspace_root or get_workspace_root()
-    state_dir = get_extensions_service_root() / "state" / extension
+    root = (workspace_root or get_workspace_root()).resolve()
+    state_dir = resolve_state_dir(extension, root)
     return ExtensionStatePaths(
         root=root,
         extension=extension,

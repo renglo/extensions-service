@@ -5,6 +5,23 @@ export AWS_PAGER="${AWS_PAGER:-}"
 # Matches launcher/scripts (provision_backend_infra.py, bootstrap_github_oidc.py, etc.)
 REGLO_DEPLOYMENT_DESCRIPTION="${REGLO_DEPLOYMENT_DESCRIPTION:-Reglo Deployment}"
 
+# Git Bash (MSYS) rewrites absolute paths in arguments (e.g. /bin/sh →
+# C:/Program Files/Git/usr/bin/sh). That breaks docker run --entrypoint and
+# container-side paths. Disable conversion for the docker CLI invocation.
+docker_cli() {
+  MSYS_NO_PATHCONV=1 docker "$@"
+}
+
+# Host side of docker -v when using docker_cli (needs a real Windows path under Git Bash).
+docker_volume_host_path() {
+  local p="$1"
+  if command -v cygpath >/dev/null 2>&1; then
+    cygpath -w "$p"
+  else
+    printf '%s' "$p"
+  fi
+}
+
 # Apply IAM role description on create and refresh on existing roles.
 reglo_ensure_iam_role_description() {
   local role_name="$1"

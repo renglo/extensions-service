@@ -4,6 +4,9 @@ Extensions are identified by extensions/<name>/package (handler code).
 Deploy configuration lives in this package under state/<name>/deploy_input.json.
 """
 import os
+import shutil
+import subprocess
+import sys
 import tomllib
 from pathlib import Path
 
@@ -17,8 +20,84 @@ def merge_script_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     return run_env
 
 
+def resolve_bash() -> str | None:
+    """Bash for ``.sh`` scripts. ``None`` on POSIX (run the script directly).
+
+    On Windows, prefer Git Bash over WSL's ``System32\\bash.exe`` (WSL remaps
+    ``C:\\`` to ``/mnt/c`` and breaks Docker Desktop build contexts).
+    Override with ``EXTENSIONS_SERVICE_BASH``.
+    """
+    if os.name != "nt":
+        return None
+    override = os.environ.get("EXTENSIONS_SERVICE_BASH", "").strip()
+    if override:
+        return override
+    for candidate in (
+        Path(r"C:\Program Files\Git\bin\bash.exe"),
+        Path(r"C:\Program Files (x86)\Git\bin\bash.exe"),
+    ):
+        if candidate.is_file():
+            return str(candidate)
+    found = shutil.which("bash")
+    if found:
+        normalized = found.replace("/", "\\").lower()
+        if "system32" not in normalized and "windowsapps" not in normalized:
+            return found
+    raise RuntimeError(
+        "bash not found for running .sh scripts on Windows. "
+        "Install Git for Windows or set EXTENSIONS_SERVICE_BASH to bash.exe."
+    )
+
+
+def run_service_script(
+    script_name: str,
+    env: dict[str, str] | None = None,
+    extra_args: list[str] | None = None,
+) -> int:
+    """Run a file under ``scripts/`` (.sh via bash on Windows; .py via sys.executable)."""
+    script = get_script_dir() / script_name
+    if not script.is_file():
+        print(f"ERROR: Script not found: {script}", file=sys.stderr)
+        return 1
+    run_env = merge_script_env(env)
+    cwd = get_workspace_root()
+    extra = list(extra_args or [])
+    if script.suffix == ".py":
+        cmd = [sys.executable, str(script), *extra]
+    else:
+        bash = resolve_bash()
+        cmd = [bash, str(script), *extra] if bash else [str(script), *extra]
+    return subprocess.run(cmd, cwd=cwd, env=run_env).returncode
+
+
+def docker_context_relpath(workspace_root: Path, absolute_path: Path) -> str:
+    """POSIX-relative path from the Docker build context (workspace) to a file/dir.
+
+    Used so Dockerfiles can COPY tooling staged under state/.lambda_build/ whether
+    the service lives at ``ops/extensions-service`` (monorepo) or
+    ``dev/extensions-service`` (CI / compose isolated tree).
+    """
+    root = workspace_root.resolve()
+    target = absolute_path.resolve()
+    try:
+        return target.relative_to(root).as_posix()
+    except ValueError as exc:
+        raise ValueError(
+            f"{target} is not under Docker context {root}; "
+            "OUTPUT_STATE_DIR must stay inside WORKSPACE_ROOT"
+        ) from exc
+
+
 def get_workspace_root() -> Path:
-    """Repo/workspace root (parent of top-level dirs like extensions/, dev/). Three levels above lib.py in .../extensions-service/."""
+    """Repo/workspace root (parent of top-level dirs like extensions/, dev/).
+
+    Default is three levels above lib.py (``.../extensions-service/`` → repo root).
+    ``WORKSPACE_ROOT`` overrides that so compose / CI can point the build at an
+    isolated tree of unpublished packages without copying this service.
+    """
+    override = os.environ.get("WORKSPACE_ROOT", "").strip()
+    if override:
+        return Path(override).expanduser().resolve()
     return Path(__file__).resolve().parent.parent.parent
 
 
@@ -132,7 +211,7 @@ def get_package_dir(extension: str, workspace_root: Path | None = None) -> Path:
 
 
 def get_env_state_dir(env: str, workspace_root: Path | None = None) -> Path:
-    """Per-env state directory: extensions-service/state/<env>/ (build artifacts + manifests)."""
+    """Per-env state: clone ``state/<env>/``, or ``<WORKSPACE_ROOT>/dev/extensions-service/state/<env>/``."""
     from state_store import get_state_paths
 
     return get_state_paths(env, workspace_root).state_dir
@@ -205,6 +284,27 @@ def parse_extension_repo_flag(args: list[str]) -> tuple[list[str], str | None]:
     return out, extension_repo
 
 
+def parse_extensions_flag(args: list[str]) -> tuple[list[str], list[str] | None]:
+    """Extract ``--extensions a,b,c`` (primary + extras). Returns (remaining, names|None)."""
+    out: list[str] = []
+    names: list[str] | None = None
+    i = 0
+    while i < len(args):
+        if args[i] == "--extensions":
+            if i + 1 >= len(args):
+                raise ValueError("--extensions requires a comma-separated list")
+            names = [e.strip() for e in args[i + 1].split(",") if e.strip()]
+            i += 2
+            continue
+        if args[i].startswith("--extensions="):
+            names = [e.strip() for e in args[i].split("=", 1)[1].split(",") if e.strip()]
+            i += 1
+            continue
+        out.append(args[i])
+        i += 1
+    return out, names
+
+
 def parse_extra_extensions_flag(args: list[str]) -> tuple[list[str], list[str]]:
     """Extract --extra-extensions a,b,c from build args. Returns (remaining_args, list_of_names)."""
     out: list[str] = []
@@ -224,6 +324,39 @@ def parse_extra_extensions_flag(args: list[str]) -> tuple[list[str], list[str]]:
         out.append(args[i])
         i += 1
     return out, extras
+
+
+def parse_value_flag(args: list[str], flag: str) -> tuple[list[str], str | None]:
+    """Extract ``--flag VALUE`` or ``--flag=VALUE``. Returns (remaining, value|None)."""
+    out: list[str] = []
+    value: str | None = None
+    prefix = f"{flag}="
+    i = 0
+    while i < len(args):
+        if args[i] == flag:
+            if i + 1 >= len(args):
+                raise ValueError(f"{flag} requires a value")
+            value = args[i + 1].strip()
+            i += 2
+            continue
+        if args[i].startswith(prefix):
+            value = args[i].split("=", 1)[1].strip()
+            i += 1
+            continue
+        out.append(args[i])
+        i += 1
+    return out, value or None
+
+
+def parse_packages_flag(args: list[str]) -> tuple[list[str], list[str] | None]:
+    """Extract ``--packages a,b,c`` (dist names). Returns (remaining, names|None)."""
+    filtered, raw = parse_value_flag(args, "--packages")
+    if raw is None:
+        return filtered, None
+    names = [p.strip() for p in raw.split(",") if p.strip()]
+    if not names:
+        raise ValueError("--packages requires at least one dist name")
+    return filtered, names
 
 
 def get_ecs_handlers_for_extension(extension: str, workspace_root: Path | None = None) -> list[str]:
