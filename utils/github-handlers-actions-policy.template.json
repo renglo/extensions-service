@@ -14,6 +14,43 @@
       "Resource": "*"
     },
     {
+      "Sid": "CodeArtifactRead",
+      "Effect": "Allow",
+      "Action": [
+        "codeartifact:DescribeDomain",
+        "codeartifact:GetAuthorizationToken",
+        "codeartifact:GetRepositoryEndpoint",
+        "codeartifact:ReadFromRepository",
+        "codeartifact:DescribeRepository",
+        "codeartifact:ListPackages",
+        "codeartifact:ListPackageVersions",
+        "codeartifact:DescribePackageVersion",
+        "codeartifact:GetPackageVersionAsset",
+        "codeartifact:GetPackageVersionReadme",
+        "codeartifact:ListPackageVersionAssets",
+        "codeartifact:ListPackageVersionDependencies"
+      ],
+      "Resource": [
+        "arn:aws:codeartifact:{{AWS_REGION}}:{{AWS_ACCOUNT}}:domain/*",
+        "arn:aws:codeartifact:{{AWS_REGION}}:{{AWS_ACCOUNT}}:repository/*/*",
+        "arn:aws:codeartifact:{{AWS_REGION}}:{{AWS_ACCOUNT}}:package/*/*/*/*",
+        "arn:aws:codeartifact:{{AWS_REGION}}:{{CODEARTIFACT_DOMAIN_OWNER}}:domain/*",
+        "arn:aws:codeartifact:{{AWS_REGION}}:{{CODEARTIFACT_DOMAIN_OWNER}}:repository/*/*",
+        "arn:aws:codeartifact:{{AWS_REGION}}:{{CODEARTIFACT_DOMAIN_OWNER}}:package/*/*/*/*"
+      ]
+    },
+    {
+      "Sid": "CodeArtifactBearerToken",
+      "Effect": "Allow",
+      "Action": ["sts:GetServiceBearerToken"],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "sts:AWSServiceName": "codeartifact.amazonaws.com"
+        }
+      }
+    },
+    {
       "Sid": "EcrPushScoped",
       "Effect": "Allow",
       "Action": [

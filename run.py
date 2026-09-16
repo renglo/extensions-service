@@ -15,13 +15,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lib import (
-    get_script_dir,
     get_workspace_root,
     get_function_name,
     get_lambda_deployment_zip_path,
     get_ecs_handlers_for_extension,
     list_extensions,
     merge_script_env,
+    run_service_script,
     validate_extension,
     validate_environment_name,
 )
@@ -53,15 +53,7 @@ def _parse_profile_and_filter_args(args: list[str]) -> tuple[str | None, list[st
 
 
 def _run_script(script_name: str, env: dict | None = None, extra_args: list[str] | None = None) -> int:
-    script_dir = get_script_dir()
-    script = script_dir / script_name
-    if not script.is_file():
-        print(f"ERROR: Script not found: {script}", file=sys.stderr)
-        return 1
-    run_env = merge_script_env(env)
-    cwd = get_workspace_root()
-    cmd = [str(script), *(extra_args or [])]
-    return subprocess.run(cmd, env=run_env, cwd=cwd).returncode
+    return run_service_script(script_name, env=env, extra_args=extra_args)
 
 
 def _run_domain_main(domain_dir: str, environment: str, action: str, rest: list[str]) -> int:
@@ -321,11 +313,12 @@ def main() -> int:
         print("              Options: --profile NAME, --region REGION, --keep-logs (keep CloudWatch groups)", file=sys.stderr)
         print("", file=sys.stderr)
         print("  deploy           Stage 2. Build image and push to ECR (reads provision_manifest for resource names).", file=sys.stderr)
-        print("    build          Build artifacts. Lambda zip is always built.", file=sys.stderr)
-        print("                   ECS image is also built automatically if provision_manifest.json", file=sys.stderr)
-        print("                   shows ECS is provisioned. Flags: --large (force ECS build),", file=sys.stderr)
-        print("                   --no-ecs (skip ECS even if provisioned), --local (ARM64 Lambda),", file=sys.stderr)
-        print("                   --extension-repo FOLDER (handler source when != env name).", file=sys.stderr)
+        print("    build          Build artifacts. Always builds Lambda zip / *-lambda-builder.", file=sys.stderr)
+        print("                   Also builds *-ecs-builder when --large or ECS is provisioned", file=sys.stderr)
+        print("                   (unless --no-ecs). Flags: --wheelhouse DIR, --assets DIR,", file=sys.stderr)
+        print("                   --packages a,b (required), --large, --no-ecs, --local (ARM64).", file=sys.stderr)
+        print("                   Prepare with --with-large-deps before --large.", file=sys.stderr)
+        print("                   See HANDLERS.md.", file=sys.stderr)
         print("    push           Push image to ECR and register task definition. --profile NAME", file=sys.stderr)
         print("    publish        Record publish event in release_manifest.", file=sys.stderr)
         print("", file=sys.stderr)
@@ -334,8 +327,8 @@ def main() -> int:
         print("                   --network-mode, --task-cpu, --task-memory, --ec2-instance-type, --asg-* flags", file=sys.stderr)
         print("    export-lambda-env  Write state/<env>/lambda_env_export.json (same as provision-infra export).", file=sys.stderr)
         print("", file=sys.stderr)
-        print("  build       Shortcut for 'deploy build'. Flags: --extension-repo FOLDER,", file=sys.stderr)
-        print("              --large, --no-ecs, --local (see deploy build).", file=sys.stderr)
+        print("  build       Shortcut for 'deploy build'. Flags: --wheelhouse/--assets/--packages,", file=sys.stderr)
+        print("              --no-ecs, --local.", file=sys.stderr)
         print("  setup-iam   Create/update Lambda IAM policy and role. --profile NAME", file=sys.stderr)
         print("  ecs-profile Shortcut for 'runtime set-profile'.", file=sys.stderr)
         print("  provision-ecs-capacity  Create/update EC2 ASG + capacity provider for ECS.", file=sys.stderr)
