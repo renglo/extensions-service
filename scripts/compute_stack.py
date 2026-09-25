@@ -419,7 +419,8 @@ class ComputeStack(Construct):
                 aws_account=aws_account,
                 aws_region=aws_region,
                 github_handlers_repo=github_handlers_repo,
-                github_handlers_oidc_sub_repo=github_handlers_oidc_sub_repo,
+                github_handlers_oidc_sub_repo=github_handlers_oidc_sub_repo
+                or github_handlers_repo,
                 github_handlers_owner_id=github_handlers_owner_id,
                 github_handlers_repo_id=github_handlers_repo_id,
                 enable_staging=enable_staging,
@@ -651,7 +652,8 @@ class ComputeStack(Construct):
             aws_account=aws_account,
             aws_region=aws_region,
             github_handlers_repo=github_handlers_repo,
-            github_handlers_oidc_sub_repo=github_handlers_oidc_sub_repo,
+            github_handlers_oidc_sub_repo=github_handlers_oidc_sub_repo
+            or github_handlers_repo,
             github_handlers_owner_id=github_handlers_owner_id,
             github_handlers_repo_id=github_handlers_repo_id,
             enable_staging=enable_staging,
